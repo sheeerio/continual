@@ -1,0 +1,6 @@
+- run with kaiming uniform <- set up already
+- how to check for dead units?
+    - log the norm of activations?
+    - log the effective rank of last layer?
+- does dropout help?
+- does layernorm help?
