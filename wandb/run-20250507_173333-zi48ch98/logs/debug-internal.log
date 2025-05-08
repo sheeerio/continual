@@ -1,0 +1,7 @@
+{"time":"2025-05-07T17:33:33.930338-07:00","level":"INFO","msg":"stream: starting","core version":"0.19.10","symlink path":"/Users/gunbir/Documents/continual/random/wandb/run-20250507_173333-zi48ch98/logs/debug-core.log"}
+{"time":"2025-05-07T17:33:34.140187-07:00","level":"INFO","msg":"created new stream","id":"zi48ch98"}
+{"time":"2025-05-07T17:33:34.14024-07:00","level":"INFO","msg":"stream: started","id":"zi48ch98"}
+{"time":"2025-05-07T17:33:34.140785-07:00","level":"INFO","msg":"handler: started","stream_id":"zi48ch98"}
+{"time":"2025-05-07T17:33:34.140803-07:00","level":"INFO","msg":"writer: Do: started","stream_id":"zi48ch98"}
+{"time":"2025-05-07T17:33:34.140983-07:00","level":"INFO","msg":"sender: started","stream_id":"zi48ch98"}
+{"time":"2025-05-07T17:33:34.30845-07:00","level":"INFO","msg":"Starting system monitor"}

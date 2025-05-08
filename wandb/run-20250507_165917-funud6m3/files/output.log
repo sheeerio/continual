@@ -630,3 +630,203 @@ Epoch [1], Loss: 2.8624
 Learning rate: 0.000995
 Epoch [2], Loss: 2.4295
 Learning rate: 0.000990
+Epoch [3], Loss: 2.3713
+Learning rate: 0.000985
+Epoch [4], Loss: 2.3344
+Learning rate: 0.000980
+Epoch [5], Loss: 2.3178
+Learning rate: 0.000975
+Epoch [6], Loss: 2.3035
+Learning rate: 0.000970
+Epoch [7], Loss: 2.2885
+Learning rate: 0.000966
+Epoch [8], Loss: 2.2768
+Learning rate: 0.000961
+Epoch [9], Loss: 2.2628
+Learning rate: 0.000956
+Epoch [10], Loss: 2.2549
+Learning rate: 0.000951
+Epoch [11], Loss: 2.2463
+Learning rate: 0.000946
+Epoch [12], Loss: 2.2370
+Learning rate: 0.000942
+Epoch [13], Loss: 2.2261
+Learning rate: 0.000937
+Epoch [14], Loss: 2.2208
+Learning rate: 0.000932
+Epoch [15], Loss: 2.2138
+Learning rate: 0.000928
+Epoch [16], Loss: 2.2047
+Learning rate: 0.000923
+Epoch [17], Loss: 2.1944
+Learning rate: 0.000918
+Epoch [18], Loss: 2.1870
+Learning rate: 0.000914
+Epoch [19], Loss: 2.1782
+Learning rate: 0.000909
+Epoch [20], Loss: 2.1709
+Learning rate: 0.000905
+Epoch [21], Loss: 2.1599
+Learning rate: 0.000900
+Epoch [22], Loss: 2.1512
+Learning rate: 0.000896
+Epoch [23], Loss: 2.1434
+Learning rate: 0.000891
+Epoch [24], Loss: 2.1317
+Learning rate: 0.000887
+Epoch [25], Loss: 2.1219
+Learning rate: 0.000882
+Epoch [26], Loss: 2.1113
+Learning rate: 0.000878
+Epoch [27], Loss: 2.1031
+Learning rate: 0.000873
+Epoch [28], Loss: 2.0933
+Learning rate: 0.000869
+Epoch [29], Loss: 2.0803
+Learning rate: 0.000865
+Epoch [30], Loss: 2.0696
+Learning rate: 0.000860
+Epoch [31], Loss: 2.0593
+Learning rate: 0.000856
+Epoch [32], Loss: 2.0472
+Learning rate: 0.000852
+Epoch [33], Loss: 2.0344
+Learning rate: 0.000848
+Epoch [34], Loss: 2.0245
+Learning rate: 0.000843
+Epoch [35], Loss: 2.0100
+Learning rate: 0.000839
+Epoch [36], Loss: 1.9998
+Learning rate: 0.000835
+Epoch [37], Loss: 1.9877
+Learning rate: 0.000831
+Epoch [38], Loss: 1.9740
+Learning rate: 0.000827
+Epoch [39], Loss: 1.9609
+Learning rate: 0.000822
+Epoch [40], Loss: 1.9478
+Learning rate: 0.000818
+Epoch [41], Loss: 1.9340
+Learning rate: 0.000814
+Epoch [42], Loss: 1.9219
+Learning rate: 0.000810
+Epoch [43], Loss: 1.9075
+Learning rate: 0.000806
+Epoch [44], Loss: 1.8932
+Learning rate: 0.000802
+Epoch [45], Loss: 1.8818
+Learning rate: 0.000798
+Epoch [46], Loss: 1.8668
+Learning rate: 0.000794
+Epoch [47], Loss: 1.8534
+Learning rate: 0.000790
+Epoch [48], Loss: 1.8382
+Learning rate: 0.000786
+Epoch [49], Loss: 1.8230
+Learning rate: 0.000782
+Epoch [50], Loss: 1.8099
+Learning rate: 0.000778
+Epoch [51], Loss: 1.7975
+Learning rate: 0.000774
+Epoch [52], Loss: 1.7833
+Learning rate: 0.000771
+Epoch [53], Loss: 1.7704
+Learning rate: 0.000767
+Epoch [54], Loss: 1.7575
+Learning rate: 0.000763
+Epoch [55], Loss: 1.7434
+Learning rate: 0.000759
+Epoch [56], Loss: 1.7300
+Learning rate: 0.000755
+Epoch [57], Loss: 1.7190
+Learning rate: 0.000751
+Epoch [58], Loss: 1.7038
+Learning rate: 0.000748
+Epoch [59], Loss: 1.6915
+Learning rate: 0.000744
+Epoch [60], Loss: 1.6770
+Learning rate: 0.000740
+Epoch [61], Loss: 1.6648
+Learning rate: 0.000737
+Epoch [62], Loss: 1.6536
+Learning rate: 0.000733
+Epoch [63], Loss: 1.6405
+Learning rate: 0.000729
+Epoch [64], Loss: 1.6279
+Learning rate: 0.000726
+Epoch [65], Loss: 1.6165
+Learning rate: 0.000722
+Epoch [66], Loss: 1.6041
+Learning rate: 0.000718
+Epoch [67], Loss: 1.5881
+Learning rate: 0.000715
+Epoch [68], Loss: 1.5764
+Learning rate: 0.000711
+Epoch [69], Loss: 1.5673
+Learning rate: 0.000708
+Epoch [70], Loss: 1.5567
+Learning rate: 0.000704
+Epoch [71], Loss: 1.5449
+Learning rate: 0.000701
+Epoch [72], Loss: 1.5327
+Learning rate: 0.000697
+Epoch [73], Loss: 1.5206
+Learning rate: 0.000694
+Epoch [74], Loss: 1.5101
+Learning rate: 0.000690
+Epoch [75], Loss: 1.4995
+Learning rate: 0.000687
+Epoch [76], Loss: 1.4882
+Learning rate: 0.000683
+Epoch [77], Loss: 1.4779
+Learning rate: 0.000680
+Epoch [78], Loss: 1.4670
+Learning rate: 0.000676
+Epoch [79], Loss: 1.4573
+Learning rate: 0.000673
+Epoch [80], Loss: 1.4471
+Learning rate: 0.000670
+Epoch [81], Loss: 1.4362
+Learning rate: 0.000666
+Epoch [82], Loss: 1.4267
+Learning rate: 0.000663
+Epoch [83], Loss: 1.4173
+Learning rate: 0.000660
+Epoch [84], Loss: 1.4090
+Learning rate: 0.000656
+Epoch [85], Loss: 1.3998
+Learning rate: 0.000653
+Epoch [86], Loss: 1.3869
+Learning rate: 0.000650
+Epoch [87], Loss: 1.3803
+Learning rate: 0.000647
+Epoch [88], Loss: 1.3684
+Learning rate: 0.000643
+Epoch [89], Loss: 1.3593
+Learning rate: 0.000640
+Epoch [90], Loss: 1.3496
+Learning rate: 0.000637
+Epoch [91], Loss: 1.3419
+Learning rate: 0.000634
+Epoch [92], Loss: 1.3326
+Learning rate: 0.000631
+Epoch [93], Loss: 1.3266
+Learning rate: 0.000627
+Epoch [94], Loss: 1.3232
+Learning rate: 0.000624
+Epoch [95], Loss: 1.3124
+Learning rate: 0.000621
+Epoch [96], Loss: 1.3025
+Learning rate: 0.000618
+Epoch [97], Loss: 1.2937
+Learning rate: 0.000615
+Epoch [98], Loss: 1.2860
+Learning rate: 0.000612
+Epoch [99], Loss: 1.2802
+Learning rate: 0.000609
+Epoch [100], Loss: 1.2730
+Learning rate: 0.000606
+Epoch [101], Loss: 1.2623
+Learning rate: 0.000603
+Epoch [102], Loss: 1.2563
+Learning rate: 0.000600

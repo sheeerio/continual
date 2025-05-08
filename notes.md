@@ -13,4 +13,4 @@
 - [ ] does layernorm help?
 - [ ] parameter values set to first run's and then run with a fresh optimizer -> want to see how much is the effect of the optimizer in this and how much of the parameter values. 
 
-- why is plasticity important? why is the ability to quickly learn multiple tasks important? okay, one reason is long sparse-reward tasks in RL but anything else? robots? how? why? anything else?
+- [ ] why is plasticity important? why is the ability to quickly learn multiple tasks important? okay, one reason is long sparse-reward tasks in RL but anything else? robots? how? why? anything else?
