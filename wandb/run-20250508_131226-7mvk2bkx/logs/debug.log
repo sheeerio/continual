@@ -1,0 +1,47 @@
+2025-05-08 13:12:26,818 INFO    MainThread:24851 [wandb_setup.py:_flush():68] Current SDK version is 0.19.10
+2025-05-08 13:12:26,818 INFO    MainThread:24851 [wandb_setup.py:_flush():68] Configure stats pid to 24851
+2025-05-08 13:12:26,818 INFO    MainThread:24851 [wandb_setup.py:_flush():68] Loading settings from /Users/gunbir/.config/wandb/settings
+2025-05-08 13:12:26,818 INFO    MainThread:24851 [wandb_setup.py:_flush():68] Loading settings from /Users/gunbir/Documents/continual/random/wandb/settings
+2025-05-08 13:12:26,818 INFO    MainThread:24851 [wandb_setup.py:_flush():68] Loading settings from environment variables
+2025-05-08 13:12:26,818 INFO    MainThread:24851 [wandb_init.py:setup_run_log_directory():724] Logging user logs to /Users/gunbir/Documents/continual/random/wandb/run-20250508_131226-7mvk2bkx/logs/debug.log
+2025-05-08 13:12:26,818 INFO    MainThread:24851 [wandb_init.py:setup_run_log_directory():725] Logging internal logs to /Users/gunbir/Documents/continual/random/wandb/run-20250508_131226-7mvk2bkx/logs/debug-internal.log
+2025-05-08 13:12:26,818 INFO    MainThread:24851 [wandb_init.py:init():852] calling init triggers
+2025-05-08 13:12:26,818 INFO    MainThread:24851 [wandb_init.py:init():857] wandb.init called with sweep_config: {}
+config: {'randomize_percent': 1.0, 'epochs': 10, 'batch_size': 512, 'dataset': 'MNIST', 'model': 'MLP', 'random_seed': 42, 'dropout': 0.0, 'initialization': 'none', '_wandb': {}}
+2025-05-08 13:12:26,818 INFO    MainThread:24851 [wandb_init.py:init():893] starting backend
+2025-05-08 13:12:26,818 INFO    MainThread:24851 [wandb_init.py:init():897] sending inform_init request
+2025-05-08 13:12:26,851 INFO    MainThread:24851 [backend.py:_multiprocessing_setup():101] multiprocessing start_methods=spawn,fork,forkserver, using: spawn
+2025-05-08 13:12:26,851 INFO    MainThread:24851 [wandb_init.py:init():907] backend started and connected
+2025-05-08 13:12:26,856 INFO    MainThread:24851 [wandb_init.py:init():1002] updated telemetry
+2025-05-08 13:12:26,899 INFO    MainThread:24851 [wandb_init.py:init():1026] communicating run to backend with 90.0 second timeout
+2025-05-08 13:12:27,270 WARNING MainThread:24851 [wandb_init.py:init():1654] [no run ID] interrupted
+Traceback (most recent call last):
+  File "/Users/gunbir/miniconda/envs/py3_11_8/lib/python3.11/site-packages/wandb/sdk/wandb_init.py", line 1650, in init
+    return wi.init(run_settings, run_config, run_printer)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/gunbir/miniconda/envs/py3_11_8/lib/python3.11/site-packages/wandb/sdk/wandb_init.py", line 1052, in init
+    result = wait_with_progress(
+             ^^^^^^^^^^^^^^^^^^^
+  File "/Users/gunbir/miniconda/envs/py3_11_8/lib/python3.11/site-packages/wandb/sdk/mailbox/wait_with_progress.py", line 24, in wait_with_progress
+    return wait_all_with_progress(
+           ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/gunbir/miniconda/envs/py3_11_8/lib/python3.11/site-packages/wandb/sdk/mailbox/wait_with_progress.py", line 70, in wait_all_with_progress
+    return _wait_handles(handle_list, timeout=progress_after)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/gunbir/miniconda/envs/py3_11_8/lib/python3.11/site-packages/wandb/sdk/mailbox/wait_with_progress.py", line 110, in _wait_handles
+    results.append(handle.wait_or(timeout=remaining_timeout))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/gunbir/miniconda/envs/py3_11_8/lib/python3.11/site-packages/wandb/sdk/mailbox/mailbox_handle.py", line 122, in wait_or
+    return self._fn(self._handle.wait_or(timeout=timeout))
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/gunbir/miniconda/envs/py3_11_8/lib/python3.11/site-packages/wandb/sdk/mailbox/response_handle.py", line 88, in wait_or
+    if not self._event.wait(timeout=timeout):
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/gunbir/miniconda/envs/py3_11_8/lib/python3.11/threading.py", line 629, in wait
+    signaled = self._cond.wait(timeout)
+               ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/gunbir/miniconda/envs/py3_11_8/lib/python3.11/threading.py", line 331, in wait
+    gotit = waiter.acquire(True, timeout)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+KeyboardInterrupt
+2025-05-08 13:12:27,278 INFO    MsgRouterThr:24851 [mailbox.py:close():129] [no run ID] Closing mailbox, abandoning 0 handles.
