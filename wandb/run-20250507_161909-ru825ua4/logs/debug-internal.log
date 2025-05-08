@@ -1,0 +1,16 @@
+{"time":"2025-05-07T16:19:09.056797-07:00","level":"INFO","msg":"stream: starting","core version":"0.19.10","symlink path":"/Users/gunbir/Documents/continual/random/wandb/run-20250507_161909-ru825ua4/logs/debug-core.log"}
+{"time":"2025-05-07T16:19:09.280825-07:00","level":"INFO","msg":"created new stream","id":"ru825ua4"}
+{"time":"2025-05-07T16:19:09.280879-07:00","level":"INFO","msg":"stream: started","id":"ru825ua4"}
+{"time":"2025-05-07T16:19:09.281058-07:00","level":"INFO","msg":"handler: started","stream_id":"ru825ua4"}
+{"time":"2025-05-07T16:19:09.281232-07:00","level":"INFO","msg":"writer: Do: started","stream_id":"ru825ua4"}
+{"time":"2025-05-07T16:19:09.281446-07:00","level":"INFO","msg":"sender: started","stream_id":"ru825ua4"}
+{"time":"2025-05-07T16:19:09.489346-07:00","level":"INFO","msg":"Starting system monitor"}
+{"time":"2025-05-07T16:46:09.994501-07:00","level":"INFO","msg":"api: retrying error","error":"Post \"https://api.wandb.ai/files/sheerio/implicit_regularization/ru825ua4/file_stream\": read tcp 206.12.136.147:58257->35.186.228.49:443: read: connection reset by peer"}
+{"time":"2025-05-07T16:51:22.000148-07:00","level":"INFO","msg":"stream: closing","id":"ru825ua4"}
+{"time":"2025-05-07T16:51:22.000816-07:00","level":"INFO","msg":"Stopping system monitor"}
+{"time":"2025-05-07T16:51:22.00284-07:00","level":"INFO","msg":"Stopped system monitor"}
+{"time":"2025-05-07T16:51:22.382292-07:00","level":"INFO","msg":"fileTransfer: Close: file transfer manager closed"}
+{"time":"2025-05-07T16:51:22.528483-07:00","level":"INFO","msg":"handler: closed","stream_id":"ru825ua4"}
+{"time":"2025-05-07T16:51:22.528521-07:00","level":"INFO","msg":"sender: closed","stream_id":"ru825ua4"}
+{"time":"2025-05-07T16:51:22.529549-07:00","level":"INFO","msg":"writer: Close: closed","stream_id":"ru825ua4"}
+{"time":"2025-05-07T16:51:22.529596-07:00","level":"INFO","msg":"stream: closed","id":"ru825ua4"}

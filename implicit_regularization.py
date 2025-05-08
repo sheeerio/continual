@@ -43,8 +43,10 @@ class MLP(nn.Module):
         self.fc1 = nn.Linear(input_size, hidden_size)
         self.fc2 = nn.Linear(hidden_size, hidden_size)
         self.fc3 = nn.Linear(hidden_size, output_size)
-        torch.nn.init.kaiming_uniform__(self.fc1.weight.data, nonlinearity='relu')
-        torch.nn.init.kaiming_uniform__(self.fc2.weight.data, nonlinearity='relu')
+        # self.dropout1 = nn.Dropout(p=0.2)
+        # self.dropout2 = nn.Dropout(p=0.2)
+        torch.nn.init.kaiming_uniform_(self.fc1.weight.data, a=0.01, nonlinearity='leaky_relu')
+        torch.nn.init.kaiming_uniform_(self.fc2.weight.data, a=0.01, nonlinearity='leaky_relu')
         # f1 = 1.0 / np.sqrt(self.fc1.weight.data.size()[0])
         # torch.nn.init.uniform_(self.fc1.weight.data, -f1, f1)
         # torch.nn.init.uniform_(self.fc1.bias.data, -f1, f1)
@@ -54,12 +56,14 @@ class MLP(nn.Module):
         # torch.nn.init.uniform_(self.fc2.bias.data, -f2, f2)
 
     def forward(self, x):
-        x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
+        x = F.leaky_relu(self.fc1(x))
+        # x = self.dropout1(x)
+        x = F.leaky_relu(self.fc2(x))
+        # x = self.dropout2(x)
         x = self.fc3(x)
         return x
 
-def train(run, model, train_loader, criterion, optimizer, target_loss=0.2):
+def train(run, model, train_loader, criterion, optimizer, target_loss=0.01):
     model.train()
     epoch = 0
     steps = 0
@@ -114,7 +118,7 @@ if __name__ == "__main__":
     # model = MLP(28*28*3, 512, 10)
     model = MLP(28*28, 512, 10)
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=0.001)
+    optimizer = optim.Adam(model.parameters(), lr=1e-3)
     # optimizer = optim.SGD(model.parameters(), lr=0.01, momentum=0.9, weight_decay=0.0005)
     run = wandb.init(
         project="implicit_regularization",
@@ -123,10 +127,12 @@ if __name__ == "__main__":
         config={
             "randomize_percent": 1.0,
             "epochs": 10,
-            "batch_size": 128,
+            "batch_size": 512,
             "dataset": "MNIST",
             "model": "MLP",
-            "random_seed": 42
+            "random_seed": 42,
+            "dropout": 0.0,
+            "initialization": "none",
         },
         # reinit=True
     )

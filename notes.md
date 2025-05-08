@@ -1,6 +1,16 @@
-- run with kaiming uniform <- set up already
+- [X] run with kaiming uniform <- set up already
+- [X] does dropout help?
+- [ ] classic kaiming again
+- [ ] run dropout and kaiming again.
 - how to check for dead units?
-    - log the norm of activations?
-    - log the effective rank of last layer?
-- does dropout help?
-- does layernorm help?
+    - [ ] log the norm of activations?
+    - [ ] log the effective rank of last layer?
+    - [ ] does reinitializing them help?
+- [X] does leaky relu help?
+    - results in exactly same output as dropout (why? : thinking ...)
+    - why does kaiming + leaky relu help better than kaiming + dropout?
+    - i thought leaky_relu ~= dropout? but then maybe they're acting different here as well?
+- [ ] does layernorm help?
+- [ ] parameter values set to first run's and then run with a fresh optimizer -> want to see how much is the effect of the optimizer in this and how much of the parameter values. 
+
+- why is plasticity important? why is the ability to quickly learn multiple tasks important? okay, one reason is long sparse-reward tasks in RL but anything else? robots? how? why? anything else?
