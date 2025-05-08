@@ -1,0 +1,13 @@
+{"time":"2025-05-08T13:12:26.857609-07:00","level":"INFO","msg":"stream: starting","core version":"0.19.10","symlink path":"/Users/gunbir/Documents/continual/random/wandb/run-20250508_131226-7mvk2bkx/logs/debug-core.log"}
+{"time":"2025-05-08T13:12:27.087192-07:00","level":"INFO","msg":"created new stream","id":"7mvk2bkx"}
+{"time":"2025-05-08T13:12:27.087254-07:00","level":"INFO","msg":"stream: started","id":"7mvk2bkx"}
+{"time":"2025-05-08T13:12:27.087275-07:00","level":"INFO","msg":"writer: Do: started","stream_id":"7mvk2bkx"}
+{"time":"2025-05-08T13:12:27.087312-07:00","level":"INFO","msg":"sender: started","stream_id":"7mvk2bkx"}
+{"time":"2025-05-08T13:12:27.087577-07:00","level":"INFO","msg":"handler: started","stream_id":"7mvk2bkx"}
+{"time":"2025-05-08T13:12:27.280183-07:00","level":"INFO","msg":"stream: closing","id":"7mvk2bkx"}
+{"time":"2025-05-08T13:12:27.280739-07:00","level":"ERROR","msg":"sender: upsertConfig: RunRecord is nil"}
+{"time":"2025-05-08T13:12:27.64294-07:00","level":"INFO","msg":"fileTransfer: Close: file transfer manager closed"}
+{"time":"2025-05-08T13:12:27.643098-07:00","level":"INFO","msg":"handler: closed","stream_id":"7mvk2bkx"}
+{"time":"2025-05-08T13:12:27.643133-07:00","level":"INFO","msg":"sender: closed","stream_id":"7mvk2bkx"}
+{"time":"2025-05-08T13:12:27.643383-07:00","level":"INFO","msg":"writer: Close: closed","stream_id":"7mvk2bkx"}
+{"time":"2025-05-08T13:12:27.643444-07:00","level":"INFO","msg":"stream: closed","id":"7mvk2bkx"}

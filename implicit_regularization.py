@@ -43,10 +43,10 @@ class MLP(nn.Module):
         self.fc1 = nn.Linear(input_size, hidden_size)
         self.fc2 = nn.Linear(hidden_size, hidden_size)
         self.fc3 = nn.Linear(hidden_size, output_size)
-        self.dropout1 = nn.Dropout(p=0.2)
-        self.dropout2 = nn.Dropout(p=0.2)
-        torch.nn.init.kaiming_uniform_(self.fc1.weight.data, nonlinearity='relu')
-        torch.nn.init.kaiming_uniform_(self.fc2.weight.data, nonlinearity='relu')
+        # self.dropout1 = nn.Dropout(p=0.2)
+        # self.dropout2 = nn.Dropout(p=0.2)
+        # torch.nn.init.kaiming_uniform_(self.fc1.weight.data, nonlinearity='relu')
+        # torch.nn.init.kaiming_uniform_(self.fc2.weight.data, nonlinearity='relu')
         # torch.nn.init.kaiming_uniform_(self.fc1.weight.data, a=0.01, nonlinearity='leaky_relu')
         # torch.nn.init.kaiming_uniform_(self.fc2.weight.data, a=0.01, nonlinearity='leaky_relu')
         # f1 = 1.0 / np.sqrt(self.fc1.weight.data.size()[0])
@@ -59,9 +59,9 @@ class MLP(nn.Module):
 
     def forward(self, x):
         x = F.relu(self.fc1(x))
-        x = self.dropout1(x)
+        # x = self.dropout1(x)
         x = F.relu(self.fc2(x))
-        x = self.dropout2(x)
+        # x = self.dropout2(x)
         x = self.fc3(x)
         return x
 
@@ -120,7 +120,8 @@ if __name__ == "__main__":
     # model = MLP(28*28*3, 512, 10)
     model = MLP(28*28, 512, 10)
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=1e-3)
+    # optimizer = optim.Adam(model.parameters(), lr=1e-3)
+    optimizer = optim.Adam(model.parameters(), lr=0.001, eps=1e-5, betas=(0.9, 0.95))
     # optimizer = optim.SGD(model.parameters(), lr=0.01, momentum=0.9, weight_decay=0.0005)
     run = wandb.init(
         project="implicit_regularization",
