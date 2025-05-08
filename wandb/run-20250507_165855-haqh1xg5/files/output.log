@@ -1,0 +1,22 @@
+Randomizing 100% of the dataset
+Train set size 60000
+Validation set size 0
+Test set size 10000
+Traceback (most recent call last):
+  File "/Users/gunbir/Documents/continual/random/implicit_regularization.py", line 165, in <module>
+    train(run, model, train_loader, criterion, optimizer)
+  File "/Users/gunbir/Documents/continual/random/implicit_regularization.py", line 76, in train
+    outputs = model(inputs)
+              ^^^^^^^^^^^^^
+  File "/Users/gunbir/miniconda/envs/py3_11_8/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1739, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/gunbir/miniconda/envs/py3_11_8/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1750, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/gunbir/Documents/continual/random/implicit_regularization.py", line 60, in forward
+    x = self.dropout1(x)
+        ^^^^^^^^^^^^^
+  File "/Users/gunbir/miniconda/envs/py3_11_8/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1928, in __getattr__
+    raise AttributeError(
+AttributeError: 'MLP' object has no attribute 'dropout1'
