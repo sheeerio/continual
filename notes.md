@@ -1,8 +1,9 @@
 - [X] run with kaiming uniform <- set up already
 - [X] does dropout help?
-- [ ] classic kaiming again
-- [ ] run dropout and kaiming again.
-- how to check for dead units?
+- [X] classic kaiming again
+- [ ] run dropout + kaiming again.
+- [ ] do the adam EMA and eps change
+- [ ] how to check for dead units?
     - [ ] log the norm of activations?
     - [ ] log the effective rank of last layer?
     - [ ] does reinitializing them help?
@@ -14,3 +15,7 @@
 - [ ] parameter values set to first run's and then run with a fresh optimizer -> want to see how much is the effect of the optimizer in this and how much of the parameter values. 
 
 - [ ] why is plasticity important? why is the ability to quickly learn multiple tasks important? okay, one reason is long sparse-reward tasks in RL but anything else? robots? how? why? anything else?
+- [ ] why is kaiming initialization helping learn faster, especially at the start? it does also help in the second run, why so stagnant afterwards? do the cumulative effects end its effects from the start? it's just an 'initialization' after all.
+- [ ] why is leaky_relu helping sustain the learning speed over time?
+- [ ] why is dropout helping sustain the learning speed over time? and is it related to what leaky_relu does here? is it doing the same thing? leaky_relu is better here though.
+- [ ] why does dropout + kaiming not work as good as leaky_relu + kaiming?
