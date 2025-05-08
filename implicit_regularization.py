@@ -43,10 +43,12 @@ class MLP(nn.Module):
         self.fc1 = nn.Linear(input_size, hidden_size)
         self.fc2 = nn.Linear(hidden_size, hidden_size)
         self.fc3 = nn.Linear(hidden_size, output_size)
-        # self.dropout1 = nn.Dropout(p=0.2)
-        # self.dropout2 = nn.Dropout(p=0.2)
-        torch.nn.init.kaiming_uniform_(self.fc1.weight.data, a=0.01, nonlinearity='leaky_relu')
-        torch.nn.init.kaiming_uniform_(self.fc2.weight.data, a=0.01, nonlinearity='leaky_relu')
+        self.dropout1 = nn.Dropout(p=0.2)
+        self.dropout2 = nn.Dropout(p=0.2)
+        torch.nn.init.kaiming_uniform_(self.fc1.weight.data, nonlinearity='relu')
+        torch.nn.init.kaiming_uniform_(self.fc2.weight.data, nonlinearity='relu')
+        # torch.nn.init.kaiming_uniform_(self.fc1.weight.data, a=0.01, nonlinearity='leaky_relu')
+        # torch.nn.init.kaiming_uniform_(self.fc2.weight.data, a=0.01, nonlinearity='leaky_relu')
         # f1 = 1.0 / np.sqrt(self.fc1.weight.data.size()[0])
         # torch.nn.init.uniform_(self.fc1.weight.data, -f1, f1)
         # torch.nn.init.uniform_(self.fc1.bias.data, -f1, f1)
@@ -56,10 +58,10 @@ class MLP(nn.Module):
         # torch.nn.init.uniform_(self.fc2.bias.data, -f2, f2)
 
     def forward(self, x):
-        x = F.leaky_relu(self.fc1(x))
-        # x = self.dropout1(x)
-        x = F.leaky_relu(self.fc2(x))
-        # x = self.dropout2(x)
+        x = F.relu(self.fc1(x))
+        x = self.dropout1(x)
+        x = F.relu(self.fc2(x))
+        x = self.dropout2(x)
         x = self.fc3(x)
         return x
 

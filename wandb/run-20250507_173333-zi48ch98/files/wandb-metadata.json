@@ -1,0 +1,44 @@
+{
+  "os": "macOS-15.4.1-arm64-arm-64bit",
+  "python": "CPython 3.11.8",
+  "startedAt": "2025-05-08T00:33:33.925684Z",
+  "program": "/Users/gunbir/Documents/continual/random/implicit_regularization.py",
+  "codePath": "implicit_regularization.py",
+  "git": {
+    "remote": "https://github.com/sheeerio/continual.git",
+    "commit": "7966444b7dfc141b85e407e4920d4d8907b0dd96"
+  },
+  "email": "sheerio105@gmail.com",
+  "root": "/Users/gunbir/Documents/continual/random",
+  "host": "dhcp-206-12-136-147.ubcsecure.wireless.ubc.ca",
+  "executable": "/Users/gunbir/miniconda/envs/py3_11_8/bin/python",
+  "codePathLocal": "implicit_regularization.py",
+  "cpu_count": 8,
+  "cpu_count_logical": 8,
+  "disk": {
+    "/": {
+      "total": "245107195904",
+      "used": "216891772928"
+    },
+    "/System/Volumes/Data": {
+      "total": "245107195904",
+      "used": "216891772928"
+    }
+  },
+  "memory": {
+    "total": "8589934592"
+  },
+  "cpu": {
+    "count": 8,
+    "countLogical": 8
+  },
+  "apple": {
+    "name": "Apple M1",
+    "ecpuCores": 4,
+    "pcpuCores": 4,
+    "gpuCores": 7,
+    "memoryGb": 8,
+    "swapTotalBytes": "5368709120",
+    "ramTotalBytes": "8589934592"
+  }
+}
