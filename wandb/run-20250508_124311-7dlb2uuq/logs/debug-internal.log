@@ -6,3 +6,11 @@
 {"time":"2025-05-08T12:43:11.481494-07:00","level":"INFO","msg":"sender: started","stream_id":"7dlb2uuq"}
 {"time":"2025-05-08T12:43:11.681407-07:00","level":"INFO","msg":"Starting system monitor"}
 {"time":"2025-05-08T12:55:57.213072-07:00","level":"INFO","msg":"api: retrying error","error":"Post \"https://api.wandb.ai/files/sheerio/implicit_regularization/7dlb2uuq/file_stream\": read tcp 206.12.140.203:57336->35.186.228.49:443: read: connection reset by peer"}
+{"time":"2025-05-08T13:18:22.769484-07:00","level":"INFO","msg":"stream: closing","id":"7dlb2uuq"}
+{"time":"2025-05-08T13:18:22.770136-07:00","level":"INFO","msg":"Stopping system monitor"}
+{"time":"2025-05-08T13:18:22.771745-07:00","level":"INFO","msg":"Stopped system monitor"}
+{"time":"2025-05-08T13:18:23.220235-07:00","level":"INFO","msg":"fileTransfer: Close: file transfer manager closed"}
+{"time":"2025-05-08T13:18:23.399955-07:00","level":"INFO","msg":"handler: closed","stream_id":"7dlb2uuq"}
+{"time":"2025-05-08T13:18:23.400053-07:00","level":"INFO","msg":"sender: closed","stream_id":"7dlb2uuq"}
+{"time":"2025-05-08T13:18:23.401023-07:00","level":"INFO","msg":"writer: Close: closed","stream_id":"7dlb2uuq"}
+{"time":"2025-05-08T13:18:23.401092-07:00","level":"INFO","msg":"stream: closed","id":"7dlb2uuq"}

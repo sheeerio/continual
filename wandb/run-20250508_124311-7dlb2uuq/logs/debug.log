@@ -20,3 +20,4 @@ config: {'randomize_percent': 1.0, 'epochs': 10, 'batch_size': 512, 'dataset': '
 2025-05-08 12:43:11,756 INFO    MainThread:20798 [wandb_run.py:_redirect():2483] Wrapping output streams.
 2025-05-08 12:43:11,756 INFO    MainThread:20798 [wandb_run.py:_redirect():2506] Redirects installed.
 2025-05-08 12:43:11,758 INFO    MainThread:20798 [wandb_init.py:init():1147] run started, returning control to user process
+2025-05-08 13:18:22,760 INFO    MsgRouterThr:20798 [mailbox.py:close():129] [no run ID] Closing mailbox, abandoning 1 handles.

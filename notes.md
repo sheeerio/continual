@@ -1,8 +1,8 @@
 - [X] run with kaiming uniform <- set up already
 - [X] does dropout help?
 - [X] classic kaiming again
-- [ ] run dropout + kaiming again.
-- [ ] do the adam EMA and eps change
+- [X] run dropout + kaiming again.
+- [X] do the adam EMA and eps change
 - [ ] how to check for dead units?
     - [ ] log the norm of activations?
     - [ ] log the effective rank of last layer?

@@ -820,3 +820,13 @@ Epoch [96], Loss: 2.0793
 Learning rate: 0.000618
 Epoch [97], Loss: 2.0788
 Learning rate: 0.000615
+Epoch [98], Loss: 2.0710
+Learning rate: 0.000612
+Epoch [99], Loss: 2.0652
+Learning rate: 0.000609
+Epoch [100], Loss: 2.0669
+Learning rate: 0.000606
+Epoch [101], Loss: 2.0602
+Learning rate: 0.000603
+Epoch [102], Loss: 2.0556
+Learning rate: 0.000600
