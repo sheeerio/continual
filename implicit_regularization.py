@@ -12,12 +12,24 @@ import torch.utils.data as data
 from torchvision import transforms
 import torch.optim as optim
 from torchvision.datasets import CIFAR10, MNIST
+import argparse
 
 import wandb
 wandb.login()
 
 DATASET_PATH = "../data"
 device = torch.device("cuda:0") if torch.cuda.is_available else torch.device("cpu")
+
+args = argparse.ArgumentParser()
+args.add_argument("--dataset", type=str, default="MNIST")
+args.add_argument("--model", type=str, default="MLP", choices=["MLP", "LeakyKaimingMLP", "LayerNormMLP", "LeakyLayerNormMLP"])
+args.add_argument("--seed", type=int)
+args.add_argument("--randomize_percent", type=float, default=0.0)
+args.add_argument("--epochs", type=int, default=10)
+args.add_argument("--batch_size", type=int, default=512)
+args.add_argument("--dropout", type=float, default=0.0)
+args.add_argument("--initialization", type=str, default="none")
+args = args.parse_args()
 
 def set_seed(seed):
     random.seed(seed)
@@ -43,25 +55,65 @@ class MLP(nn.Module):
         self.fc1 = nn.Linear(input_size, hidden_size)
         self.fc2 = nn.Linear(hidden_size, hidden_size)
         self.fc3 = nn.Linear(hidden_size, output_size)
-        # self.dropout1 = nn.Dropout(p=0.2)
-        # self.dropout2 = nn.Dropout(p=0.2)
-        # torch.nn.init.kaiming_uniform_(self.fc1.weight.data, nonlinearity='relu')
-        # torch.nn.init.kaiming_uniform_(self.fc2.weight.data, nonlinearity='relu')
-        # torch.nn.init.kaiming_uniform_(self.fc1.weight.data, a=0.01, nonlinearity='leaky_relu')
-        # torch.nn.init.kaiming_uniform_(self.fc2.weight.data, a=0.01, nonlinearity='leaky_relu')
-        # f1 = 1.0 / np.sqrt(self.fc1.weight.data.size()[0])
-        # torch.nn.init.uniform_(self.fc1.weight.data, -f1, f1)
-        # torch.nn.init.uniform_(self.fc1.bias.data, -f1, f1)
-
-        # f2 = 1.0 / np.sqrt(self.fc2.weight.data.size()[0])
-        # torch.nn.init.uniform_(self.fc2.weight.data, -f2, f2)
-        # torch.nn.init.uniform_(self.fc2.bias.data, -f2, f2)
 
     def forward(self, x):
-        x = F.relu(self.fc1(x))
-        # x = self.dropout1(x)
-        x = F.relu(self.fc2(x))
-        # x = self.dropout2(x)
+        x = self.fc1(x)
+        x = F.relu(x)
+        x = self.fc2(x)
+        x = F.relu(x)
+        x = self.fc3(x)
+        return x
+
+class LeakyKaimingMLP(nn.Module):
+    def __init__(self, input_size, hidden_size, output_size):
+        super(MLP, self).__init__()
+        self.fc1 = nn.Linear(input_size, hidden_size)
+        self.fc2 = nn.Linear(hidden_size, hidden_size)
+        self.fc3 = nn.Linear(hidden_size, output_size)
+        torch.nn.init.kaiming_uniform_(self.fc1.weight.data, a=0.01, nonlinearity='leaky_relu')
+        torch.nn.init.kaiming_uniform_(self.fc2.weight.data, a=0.01, nonlinearity='leaky_relu')
+
+    def forward(self, x):
+        x = self.fc1(x)
+        x = F.leaky_relu(x)
+        x = self.fc2(x)
+        x = F.leaky_relu(x)
+        x = self.fc3(x)
+        return x
+
+class LayerNormMLP(nn.Module):
+    def __init__(self, input_size, hidden_size, output_size):
+        super(MLP, self).__init__()
+        self.fc1 = nn.Linear(input_size, hidden_size)
+        self.fc2 = nn.Linear(hidden_size, hidden_size)
+        self.fc3 = nn.Linear(hidden_size, output_size)
+        self.ln1 = nn.LayerNorm(hidden_size)
+        self.ln2 = nn.LayerNorm(hidden_size)
+
+    def forward(self, x):
+        x = self.fc1(x)
+        x = F.relu(self.ln1(x))
+        x = self.fc2(x)
+        x = F.relu(self.ln2(x))
+        x = self.fc3(x)
+        return x
+
+class LeakyLayerNormMLP(nn.Module):
+    def __init__(self, input_size, hidden_size, output_size):
+        super(MLP, self).__init__()
+        self.fc1 = nn.Linear(input_size, hidden_size)
+        self.fc2 = nn.Linear(hidden_size, hidden_size)
+        self.fc3 = nn.Linear(hidden_size, output_size)
+        self.ln1 = nn.LayerNorm(hidden_size)
+        self.ln2 = nn.LayerNorm(hidden_size)
+        torch.nn.init.kaiming_uniform_(self.fc1.weight.data, a=0.01, nonlinearity='leaky_relu')
+        torch.nn.init.kaiming_uniform_(self.fc2.weight.data, a=0.01, nonlinearity='leaky_relu')
+
+    def forward(self, x):
+        x = self.fc1(x)
+        x = F.leaky_relu(self.ln1(x))
+        x = self.fc2(x)
+        x = F.leaky_relu(self.ln2(x))
         x = self.fc3(x)
         return x
 
@@ -69,11 +121,11 @@ def train(run, model, train_loader, criterion, optimizer, target_loss=0.01):
     model.train()
     epoch = 0
     steps = 0
-    optimizer.param_groups[0]['lr'] = 0.001
-    while steps < 12000:
+    optimizer.param_groups[0]['lr'] = 1e-3
+    while steps < 7500:
         running_loss = 0.0
         for i, (inputs, labels) in enumerate(train_loader):
-            inputs, labels = inputs.view(inputs.size(0), -1), labels
+            inputs, labels = inputs.view(inputs.size(0), -1).to(device), labels.to(device)
             optimizer.zero_grad()
             outputs = model(inputs)
             loss = criterion(outputs, labels)
@@ -88,82 +140,80 @@ def train(run, model, train_loader, criterion, optimizer, target_loss=0.01):
         optimizer.param_groups[0]['lr'] *= 0.995
         print(f"Learning rate: {optimizer.param_groups[0]['lr']:.6f}")
 
-        if avg_loss <= target_loss:
-            print("Target loss reached. Stopping training.")
-            break
+        # if avg_loss <= target_loss:
+        #     print("Target loss reached. Stopping training.")
+        #     break
         epoch += 1
 
 if __name__ == "__main__":
     # train_dataset = CIFAR10(root=DATASET_PATH, train=True, download=True)
     train_dataset = MNIST(root=DATASET_PATH, train=True, download=True)
-    # DATA_MEAN = (train_dataset.data/255.).mean(axis=(0,1,2))
-    # DATA_STD = (train_dataset.data/255.).std(axis=(0,1,2))
+    DATA_MEAN = (train_dataset.data/255.).mean(axis=(0,1,2))
+    DATA_STD = (train_dataset.data/255.).std(axis=(0,1,2))
     # print("Data mean", DATA_MEAN)
     # print("DATA std", DATA_STD)
 
     train_transform = transforms.Compose([
     # transforms.CenterCrop(28),
     transforms.ToTensor(),
-    # transforms.Normalize(mean=DATA_MEAN, std=DATA_STD),
+    transforms.Normalize(mean=DATA_MEAN, std=DATA_STD),
     ])
     test_transform = transforms.Compose([
         transforms.ToTensor(),
-        # transforms.Normalize(mean=DATA_MEAN, std=DATA_STD),
+        transforms.Normalize(mean=DATA_MEAN, std=DATA_STD),
     ])
 
     # train_dataset = CIFAR10(root=DATASET_PATH, train=True, download=True, transform=train_transform)
     # test_dataset = CIFAR10(root=DATASET_PATH, train=False, download=True, transform=test_transform)
     train_dataset = MNIST(root=DATASET_PATH, train=True, download=True, transform=train_transform)
     test_dataset = MNIST(root=DATASET_PATH, train=False, download=True, transform=test_transform)
-    set_seed(42)
+    set_seed(args.seed)
 
     # model = MLP(28*28*3, 512, 10)
-    model = MLP(28*28, 512, 10)
+    if args.model == "MLP":
+        model = MLP(28*28, 512, 10).to(device)
+    elif args.model == "LeakyKaimingMLP":
+        model = LeakyKaimingMLP(28*28, 512, 10).to(device)
+    elif args.model == "LayerNormMLP":
+        model = LayerNormMLP(28*28, 512, 10).to(device)
+    elif args.model == "LeakyLayerNormMLP":
+        model = LeakyLayerNormMLP(28*28, 512, 10).to(device)
+    else:
+        raise ValueError("Invalid model type. Choose from ['MLP', 'LeakyKaimingMLP', 'LayerNormMLP', 'LeakyLayerNormMLP']")
     criterion = nn.CrossEntropyLoss()
-    # optimizer = optim.Adam(model.parameters(), lr=1e-3)
-    optimizer = optim.Adam(model.parameters(), lr=0.001, eps=1e-5, betas=(0.9, 0.95))
-    # optimizer = optim.SGD(model.parameters(), lr=0.01, momentum=0.9, weight_decay=0.0005)
+    optimizer = optim.Adam(model.parameters(), lr=1e-3)
+    # optimizer = optim.Adam(model.parameters(), lr=1e-3, eps=1e-5, betas=(0.9, 0.85))
+    # optimizer = optim.SGD(model.parameters(), lr=0.01, momentum=0.5)
+    
     run = wandb.init(
         project="implicit_regularization",
         entity="sheerio",
         group="continual",
+        name=f"{args.model}",
         config={
             "randomize_percent": 1.0,
             "epochs": 10,
             "batch_size": 512,
             "dataset": "MNIST",
             "model": "MLP",
-            "random_seed": 42,
+            "random_seed": 69,
             "dropout": 0.0,
             "initialization": "none",
         },
         # reinit=True
     )
-    for i in range(10, 14, 1):
-        # run = wandb.init(
-        #     project="implicit_regularization",
-        #     entity="sheerio",
-        #     group="continual",
-        #     config={
-        #         "randomize_percent": min(i/10, 1),
-        #         "epochs": 10,
-        #         "batch_size": 128,
-        #         "dataset": "MNIST",
-        #         "model": "MLP",
-        #         "random_seed": 42
-        #     },
-        #     # reinit=True
-        # )
-
+    for i in range(10, 16, 1):
         print(f"Randomizing {min(i+1, 10)}0% of the dataset")
         train_dataset_c = randomize_targets(train_dataset, i/10)
         train_set, val_set = torch.utils.data.random_split(train_dataset_c, [60000, 0])
         print("Train set size", len(train_set))
         print("Validation set size", len(val_set))
         print("Test set size", len(test_dataset))
-        train_loader = data.DataLoader(train_set, batch_size=512, shuffle=True, num_workers=1)
-        val_loader = data.DataLoader(val_set, batch_size=512, shuffle=False, num_workers=1)
-        test_loader = data.DataLoader(test_dataset, batch_size=512, shuffle=False, num_workers=1)
+
+        num_workers = min(os.cpu_count(), 8)
+        train_loader = data.DataLoader(train_set, batch_size=2048, shuffle=True, num_workers=num_workers)
+        val_loader = data.DataLoader(val_set, batch_size=1024, shuffle=False, num_workers=1)
+        test_loader = data.DataLoader(test_dataset, batch_size=1024, shuffle=False, num_workers=1)
 
         train(run, model, train_loader, criterion, optimizer)
         # if i > 20:
