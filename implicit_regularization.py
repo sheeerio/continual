@@ -22,8 +22,9 @@ device = torch.device("cuda:0") if torch.cuda.is_available else torch.device("cp
 
 args = argparse.ArgumentParser()
 args.add_argument("--dataset", type=str, default="MNIST")
-args.add_argument("--model", type=str, default="MLP", choices=["MLP", "LeakyKaimingMLP", "LayerNormMLP", "LeakyLayerNormMLP"])
-args.add_argument("--seed", type=int)
+args.add_argument("--model", type=str, default="LayerNormMLP", choices=["MLP", "LeakyKaimingMLP", "LayerNormMLP", "LeakyLayerNormMLP"])
+args.add_argument("--seed", type=int, default=0)
+args.add_argument("--weight_decay", type=float, default=0.0)
 args.add_argument("--randomize_percent", type=float, default=0.0)
 args.add_argument("--epochs", type=int, default=10)
 args.add_argument("--batch_size", type=int, default=512)
@@ -66,7 +67,7 @@ class MLP(nn.Module):
 
 class LeakyKaimingMLP(nn.Module):
     def __init__(self, input_size, hidden_size, output_size):
-        super(MLP, self).__init__()
+        super(LeakyKaimingMLP, self).__init__()
         self.fc1 = nn.Linear(input_size, hidden_size)
         self.fc2 = nn.Linear(hidden_size, hidden_size)
         self.fc3 = nn.Linear(hidden_size, output_size)
@@ -83,7 +84,7 @@ class LeakyKaimingMLP(nn.Module):
 
 class LayerNormMLP(nn.Module):
     def __init__(self, input_size, hidden_size, output_size):
-        super(MLP, self).__init__()
+        super(LayerNormMLP, self).__init__()
         self.fc1 = nn.Linear(input_size, hidden_size)
         self.fc2 = nn.Linear(hidden_size, hidden_size)
         self.fc3 = nn.Linear(hidden_size, output_size)
@@ -100,7 +101,7 @@ class LayerNormMLP(nn.Module):
 
 class LeakyLayerNormMLP(nn.Module):
     def __init__(self, input_size, hidden_size, output_size):
-        super(MLP, self).__init__()
+        super(LeakyLayerNormMLP, self).__init__()
         self.fc1 = nn.Linear(input_size, hidden_size)
         self.fc2 = nn.Linear(hidden_size, hidden_size)
         self.fc3 = nn.Linear(hidden_size, output_size)
@@ -119,9 +120,11 @@ class LeakyLayerNormMLP(nn.Module):
 
 def train(run, model, train_loader, criterion, optimizer, target_loss=0.01):
     model.train()
-    epoch = 0
+    # epoch = 0
     steps = 0
     optimizer.param_groups[0]['lr'] = 1e-3
+    log_interval = 100  # steps
+
     while steps < 7500:
         running_loss = 0.0
         for i, (inputs, labels) in enumerate(train_loader):
@@ -132,18 +135,28 @@ def train(run, model, train_loader, criterion, optimizer, target_loss=0.01):
             loss.backward()
             optimizer.step()
             running_loss += loss.item()
-            run.log({"loss": loss.item()})
-            steps += 1
-        avg_loss = running_loss / len(train_loader)
-        print(f"Epoch [{epoch+1}], Loss: {avg_loss:.4f}")
 
-        optimizer.param_groups[0]['lr'] *= 0.995
-        print(f"Learning rate: {optimizer.param_groups[0]['lr']:.6f}")
+            if steps % log_interval == 0:
+                log_dict = {
+                    "loss": loss.item(),
+                    # "step": steps,
+                    # "lr": optimizer.param_groups[0]['lr']
+                }
+                for name, param in model.named_parameters():
+                    if param.requires_grad:
+                        log_dict[f"param_norm/{name}"] = param.data.norm().item()
+                        if param.grad is not None:
+                            log_dict[f"grad_norm/{name}"] = param.grad.norm().item()
+
+                run.log(log_dict)
+
+            steps += 1
+
 
         # if avg_loss <= target_loss:
         #     print("Target loss reached. Stopping training.")
         #     break
-        epoch += 1
+        # epoch += 1
 
 if __name__ == "__main__":
     # train_dataset = CIFAR10(root=DATASET_PATH, train=True, download=True)
@@ -181,7 +194,7 @@ if __name__ == "__main__":
     else:
         raise ValueError("Invalid model type. Choose from ['MLP', 'LeakyKaimingMLP', 'LayerNormMLP', 'LeakyLayerNormMLP']")
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=1e-3)
+    optimizer = optim.Adam(model.parameters(), lr=1e-3, weight_decay=args.weight_decay)
     # optimizer = optim.Adam(model.parameters(), lr=1e-3, eps=1e-5, betas=(0.9, 0.85))
     # optimizer = optim.SGD(model.parameters(), lr=0.01, momentum=0.5)
     
@@ -196,13 +209,14 @@ if __name__ == "__main__":
             "batch_size": 512,
             "dataset": "MNIST",
             "model": "MLP",
-            "random_seed": 69,
+            "random_seed": args.seed,
             "dropout": 0.0,
             "initialization": "none",
+            "weight_decay": args.weight_decay,
         },
         # reinit=True
     )
-    for i in range(10, 16, 1):
+    for i in range(10, 10+args.epochs, 1):
         print(f"Randomizing {min(i+1, 10)}0% of the dataset")
         train_dataset_c = randomize_targets(train_dataset, i/10)
         train_set, val_set = torch.utils.data.random_split(train_dataset_c, [60000, 0])
