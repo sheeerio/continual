@@ -22,12 +22,12 @@ device = torch.device("cuda:0") if torch.cuda.is_available else torch.device("cp
 
 args = argparse.ArgumentParser()
 args.add_argument("--dataset", type=str, default="MNIST")
-args.add_argument("--model", type=str, default="LayerNormMLP", choices=["MLP", "KaimingMLP", "LeakyMLP", "LeakyKaimingMLP", "LayerNormMLP", "LeakyLayerNormMLP", "LeakyKaimingLayerNormMLP"])
+args.add_argument("--model", type=str, default="LayerNormMLP", choices=["MLP", "KaimingMLP", "LeakyMLP", "LeakyKaimingMLP", "LayerNormMLP", "BatchNormMLP", "LeakyLayerNormMLP", "LeakyKaimingLayerNormMLP", "LinearNet"])
 args.add_argument("--seed", type=int, default=0)
 args.add_argument("--weight_decay", type=float, default=0.0)
 args.add_argument("--randomize_percent", type=float, default=0.0)
 args.add_argument("--epochs", type=int, default=10)
-args.add_argument("--batch_size", type=int, default=512)
+args.add_argument("--batch_size", type=int, default=2048)
 args.add_argument("--dropout", type=float, default=0.0)
 args.add_argument("--initialization", type=str, default="none")
 args.add_argument("--log_interval", type=int, default=100)
@@ -50,6 +50,17 @@ def randomize_targets(dataset, percent):
         dataset.targets[idx] = random.randint(0, 9) 
     dataset.targets = dataset.targets
     return dataset
+
+class LinearNet(nn.Module):
+    def __init__(self, input_size, output_size):
+        super(LinearNet, self).__init__()
+        self.fc1 = nn.Linear(input_size, 512)
+        self.fc2 = nn.Linear(512, output_size)
+
+    def forward(self, x):
+        x = self.fc1(x)
+        x = self.fc2(x)
+        return x
 
 class MLP(nn.Module):
     def __init__(self, input_size, hidden_size, output_size):
@@ -125,12 +136,34 @@ class LayerNormMLP(nn.Module):
         self.fc3 = nn.Linear(hidden_size, output_size)
         self.ln1 = nn.LayerNorm(hidden_size)
         self.ln2 = nn.LayerNorm(hidden_size)
+        self.ln1.bias.requires_grad = False
+        self.ln2.bias.requires_grad = False
+        with torch.no_grad():
+            self.ln1.bias.fill_(0.0)
+            self.ln2.bias.fill_(0.0)
 
     def forward(self, x):
         x = self.fc1(x)
         x = F.relu(self.ln1(x))
         x = self.fc2(x)
         x = F.relu(self.ln2(x))
+        x = self.fc3(x)
+        return x
+
+class BatchNormMLP(nn.Module):
+    def __init__(self, input_size, hidden_size, output_size):
+        super(BatchNormMLP, self).__init__()
+        self.fc1 = nn.Linear(input_size, hidden_size)
+        self.fc2 = nn.Linear(hidden_size, hidden_size)
+        self.fc3 = nn.Linear(hidden_size, output_size)
+        self.bn1 = nn.BatchNorm1d(hidden_size)
+        self.bn2 = nn.BatchNorm1d(hidden_size)
+
+    def forward(self, x):
+        x = self.fc1(x)
+        x = F.relu(self.bn1(x))
+        x = self.fc2(x)
+        x = F.relu(self.bn2(x))
         x = self.fc3(x)
         return x
 
@@ -200,29 +233,41 @@ def train(run, model, train_loader, criterion, optimizer, target_loss=0.01):
                         if param.grad is not None:
                             log_dict[f"grad_norm/{name}"] = param.grad.norm().item()
 
-                with torch.no_grad():
-                    hidden_activations = F.relu(model.fc1(inputs))
-                    dead_units = (hidden_activations.sum(dim=0) == 0).float().mean().item()
-                    entropy = -torch.mean(torch.sum(F.softmax(outputs, dim=1) * F.log_softmax(outputs, dim=1), dim=1)).item()
-                    logit_norm = outputs.norm().item()
-                    feature_norm = hidden_activations.norm().item()
-                    log_dict["feature_norm"] = feature_norm
-                    log_dict["logit_norm"] = logit_norm
-                    log_dict["entropy"] = entropy
-                    log_dict["dead_unit_fraction"] = dead_units
+                # with torch.no_grad():
+                    # hidden_activations = F.relu(model.fc1(inputs))
+                    # dead_units = (hidden_activations.sum(dim=0) == 0).float().mean().item()
+                    # entropy = -torch.mean(torch.sum(F.softmax(outputs, dim=1) * F.log_softmax(outputs, dim=1), dim=1)).item()
+                    # logit_norm = outputs.norm().item()
+                    # feature_norm = hidden_activations.norm().item()
+                    # log_dict["feature_norm"] = feature_norm
+                    # log_dict["logit_norm"] = logit_norm
+                    # log_dict["entropy"] = entropy
+                    # log_dict["dead_unit_fraction"] = dead_units
+
+                    # Calculate feature_rank_v1 (number of singular values above epsilon)
+                    # s = torch.linalg.svdvals(hidden_activations)
+                    # epsilon = 0.01 * s[0]  # Example: threshold is 1% of the largest singular value
+                    # num_above_epsilon = (s > epsilon).sum().item()
+                    # log_dict["feature_rank_v1"] = num_above_epsilon
+
+                    # # Calculate feature_rank_v2 (min k for cumulative sum >= (1-delta))
+                    # delta = 0.05  # Example: 5% threshold
+                    # s_sum = torch.sum(s)
+                    # s_cumsum = torch.cumsum(s, dim=0)
+                    # k_values = (s_cumsum / s_sum >= (1 - delta)).nonzero()
+                    # if len(k_values) > 0:
+                    #     feature_rank_v2 = k_values[0].item() + 1
+                    # else:
+                    #     feature_rank_v2 = len(s)  # If no k satisfies the condition, use the full rank
+                    # log_dict["feature_rank_v2"] = feature_rank_v2
 
                 run.log(log_dict)
 
             steps += 1
-
-
         # if avg_loss <= target_loss:
         #     print("Target loss reached. Stopping training.")
-        #     break
-        # epoch += 1
 
 if __name__ == "__main__":
-    # train_dataset = CIFAR10(root=DATASET_PATH, train=True, download=True)
     train_dataset = MNIST(root=DATASET_PATH, train=True, download=True)
     DATA_MEAN = (train_dataset.data/255.).mean(axis=(0,1,2))
     DATA_STD = (train_dataset.data/255.).std(axis=(0,1,2))
@@ -260,8 +305,12 @@ if __name__ == "__main__":
         model = KaimingMLP(28*28, 512, 10).to(device)
     elif args.model == "LeakyMLP":
         model = LeakyMLP(28*28, 512, 10).to(device)
+    elif args.model == "LinearNet":
+        model = LinearNet(28*28, 10).to(device)
+    elif args.model == "BatchNormMLP":
+        model = BatchNormMLP(28*28, 512, 10).to(device)
     else:
-        raise ValueError("Invalid model type. Choose from ['MLP', 'LeakyKaimingMLP', 'LayerNormMLP', 'LeakyLayerNormMLP']")
+        raise ValueError("Invalid model type. Choose from ['MLP', 'LeakyKaimingMLP', 'LayerNormMLP', 'LeakyLayerNormMLP', 'LinearNet']")
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=1e-3, weight_decay=args.weight_decay)
     # optimizer = optim.Adam(model.parameters(), lr=1e-3, eps=1e-5, betas=(0.9, 0.85))
@@ -294,7 +343,7 @@ if __name__ == "__main__":
         print("Test set size", len(test_dataset))
 
         num_workers = min(os.cpu_count(), 15)
-        train_loader = data.DataLoader(train_set, batch_size=512, shuffle=True, num_workers=num_workers)
+        train_loader = data.DataLoader(train_set, batch_size=args.batch_size, shuffle=True, num_workers=num_workers)
         val_loader = data.DataLoader(val_set, batch_size=1024, shuffle=False, num_workers=1)
         test_loader = data.DataLoader(test_dataset, batch_size=1024, shuffle=False, num_workers=1)
 
