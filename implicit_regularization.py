@@ -64,11 +64,13 @@ def randomize_targets(dataset, p):
         dataset.targets[i] = random.randint(0, 9)
     return dataset
 
-P = torch.randn(36, 28*28) / (36**0.5)      # shape (36, 784)
+
+P = torch.randn(36, 28 * 28) / (36**0.5)  # shape (36, 784)
+
 
 def stochastic_project(x):
     x = x.view(-1)
-    return P @ x 
+    return P @ x
 
 
 def empirical_fischer_rank(model, dataset, device, thresh=0.99, max_m=1000):
@@ -79,7 +81,7 @@ def empirical_fischer_rank(model, dataset, device, thresh=0.99, max_m=1000):
     m = 0
 
     for x, y in loader:
-        if m>=max_m: 
+        if m >= max_m:
             break
         x, y = x.view(x.size(0), -1).to(device), y.to(device)
         model.zero_grad()
@@ -91,15 +93,15 @@ def empirical_fischer_rank(model, dataset, device, thresh=0.99, max_m=1000):
         grads.append(g)
         m += 1
         torch.cuda.empty_cache()
-    
+
     G = torch.stack(grads)
     M = G @ G.T
 
     sig = torch.linalg.svdvals(M)
     cumsum = torch.cumsum(sig, dim=0)
     total = cumsum[-1]
-    j = (cumsum/total >= thresh).nonzero()[0].item() + 1
-    
+    j = (cumsum / total >= thresh).nonzero()[0].item() + 1
+
     return j / float(m)
 
 
@@ -204,11 +206,19 @@ set_seed(args.seed)
 train_dataset = MNIST(root="../data", train=True, download=True)
 DATA_MEAN = (train_dataset.data / 255.0).mean(axis=(0, 1, 2))
 DATA_STD = (train_dataset.data / 255.0).std(axis=(0, 1, 2))
-tf = transforms.Compose([transforms.ToTensor(), transforms.Normalize(mean=DATA_MEAN, std=DATA_STD)])
-input_size = 28*28
+tf = transforms.Compose(
+    [transforms.ToTensor(), transforms.Normalize(mean=DATA_MEAN, std=DATA_STD)]
+)
+input_size = 28 * 28
 h = 256
 if args.project:
-    tf = transforms.Compose([transforms.ToTensor(), transforms.Normalize(mean=DATA_MEAN, std=DATA_STD), transforms.Lambda(stochastic_project)])
+    tf = transforms.Compose(
+        [
+            transforms.ToTensor(),
+            transforms.Normalize(mean=DATA_MEAN, std=DATA_STD),
+            transforms.Lambda(stochastic_project),
+        ]
+    )
     input_size = 36
     h = 32
 train_dataset = MNIST(root="../data", train=True, download=True, transform=tf)
@@ -264,7 +274,7 @@ for i in range(10, 10 + args.runs):
         shuffle=True,
         num_workers=min(15, os.cpu_count()),
     )
-    
+
     hessian_rank = empirical_fischer_rank(model, train_dataset_c, device)
     run.log({"Hessian_rank": hessian_rank})
 
