@@ -41,6 +41,7 @@ parser.add_argument("--runs", type=int, default=30)
 parser.add_argument("--batch_size", type=int, default=256)
 parser.add_argument("--dropout", type=float, default=0.0)
 parser.add_argument("--log_interval", type=int, default=400)
+parser.add_argument("--project", type=bool, default=False)
 args = parser.parse_args()
 
 device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
@@ -62,6 +63,44 @@ def randomize_targets(dataset, p):
     for i in idx:
         dataset.targets[i] = random.randint(0, 9)
     return dataset
+
+P = torch.randn(36, 28*28) / (36**0.5)      # shape (36, 784)
+
+def stochastic_project(x):
+    x = x.view(-1)
+    return P @ x 
+
+
+def empirical_fischer_rank(model, dataset, device, thresh=0.99, max_m=1000):
+    loader = data.DataLoader(dataset, batch_size=1, shuffle=False)
+    model.eval()
+    params = [p for p in model.parameters() if p.requires_grad]
+    grads = []
+    m = 0
+
+    for x, y in loader:
+        if m>=max_m: 
+            break
+        x, y = x.view(x.size(0), -1).to(device), y.to(device)
+        model.zero_grad()
+        output = model(x)
+        loss = nn.CrossEntropyLoss()(output, y)
+        loss.backward()
+
+        g = torch.cat([p.grad.view(-1) for p in params])
+        grads.append(g)
+        m += 1
+        torch.cuda.empty_cache()
+    
+    G = torch.stack(grads)
+    M = G @ G.T
+
+    sig = torch.linalg.svdvals(M)
+    cumsum = torch.cumsum(sig, dim=0)
+    total = cumsum[-1]
+    j = (cumsum/total >= thresh).nonzero()[0].item() + 1
+    
+    return j / float(m)
 
 
 class MLP(nn.Module):
@@ -165,28 +204,32 @@ set_seed(args.seed)
 train_dataset = MNIST(root="../data", train=True, download=True)
 DATA_MEAN = (train_dataset.data / 255.0).mean(axis=(0, 1, 2))
 DATA_STD = (train_dataset.data / 255.0).std(axis=(0, 1, 2))
-tf = transforms.Compose(
-    [transforms.ToTensor(), transforms.Normalize(mean=DATA_MEAN, std=DATA_STD)]
-)
+tf = transforms.Compose([transforms.ToTensor(), transforms.Normalize(mean=DATA_MEAN, std=DATA_STD)])
+input_size = 28*28
+h = 256
+if args.project:
+    tf = transforms.Compose([transforms.ToTensor(), transforms.Normalize(mean=DATA_MEAN, std=DATA_STD), transforms.Lambda(stochastic_project)])
+    input_size = 36
+    h = 32
 train_dataset = MNIST(root="../data", train=True, download=True, transform=tf)
 test_dataset = MNIST(root="../data", train=False, download=True, transform=tf)
 
 if args.model == "MLP":
-    model = MLP(28 * 28, 256, 10).to(device)
+    model = MLP(input_size, h, 10).to(device)
 elif args.model == "LayerNormMLP":
-    model = LayerNormMLP(28 * 28, 512, 10).to(device)
+    model = LayerNormMLP(input_size, h, 10).to(device)
 elif args.model == "BatchNormMLP":
-    model = BatchNormMLP(28 * 28, 512, 10).to(device)
+    model = BatchNormMLP(input_size, h, 10).to(device)
 elif args.model == "LeakyLayerNormMLP":
-    model = LeakyLayerNormMLP(28 * 28, 512, 10).to(device)
+    model = LeakyLayerNormMLP(input_size, h, 10).to(device)
 elif args.model == "LeakyKaimingLayerNormMLP":
-    model = LeakyKaimingLayerNormMLP(28 * 28, 512, 10).to(device)
+    model = LeakyKaimingLayerNormMLP(input_size, h, 10).to(device)
 elif args.model == "LinearNet":
     from torch.nn import Identity
 
     model = nn.Sequential(nn.Flatten(), Identity()).to(device)
 else:
-    model = MLP(28 * 28, 256, 10).to(device)
+    model = MLP(input_size, 256, 10).to(device)
 
 criterion = nn.CrossEntropyLoss()
 optimizer = optim.Adam(model.parameters(), lr=1e-3, weight_decay=args.weight_decay)
@@ -221,6 +264,10 @@ for i in range(10, 10 + args.runs):
         shuffle=True,
         num_workers=min(15, os.cpu_count()),
     )
+    
+    hessian_rank = empirical_fischer_rank(model, train_dataset_c, device)
+    run.log({"Hessian_rank": hessian_rank})
+
     model.train()
     total_updates = 0
     sum_update_norm = 0.0
