@@ -117,6 +117,13 @@ def estimate_hessian_topk(model, loss, params, k=5, iters=10):
         vs.append(v)
     return eigs
 
+def compute_use_for_activation(h):
+    with torch.no_grad():
+        pos = (h > 0).float().mean(dim=0)
+        eps = 1e-12
+        ent = -(pos * (pos + eps).log() + (1 - pos) * (1 - pos + eps).log())
+        return ent.mean().item()
+
 class MLP(nn.Module):
     def __init__(self, i, h, o):
         super().__init__()
@@ -242,6 +249,16 @@ elif args.model == "LinearNet":
 else:
     model = MLP(input_size, h, 10).to(device)
 
+activations = {}
+def save_activations(name):
+    def hook(m, inp, out):
+        activations[name] = out
+    return hook
+
+model.fc1.register_forward_hook(save_activations("l1"))
+model.fc2.register_forward_hook(save_activations("l2"))
+model.fc3.register_forward_hook(save_activations("l3"))
+
 criterion = nn.CrossEntropyLoss()
 optimizer = optim.Adam(model.parameters(), lr=1e-3, weight_decay=args.weight_decay)
 run = wandb.init(
@@ -290,7 +307,8 @@ for i in range(10, 10 + args.runs):
             params = [p for p in model.parameters() if p.requires_grad]
             eigs = estimate_hessian_topk(model, loss, params, k=5)
             hess_avg = sum(eigs) / len(eigs)
-            run.log({"hessian_avg_top_5": hess_avg})
+            use_vals = {f"use_{name}": compute_use_for_activation(h) for name, h in activations.items()}
+            run.log({"hessian_avg_top_5": hess_avg, **use_vals})
             old_params = [p.data.clone() for p in params]
             loss.backward()
             optimizer.step()
