@@ -42,6 +42,7 @@ parser.add_argument("--batch_size", type=int, default=256)
 parser.add_argument("--dropout", type=float, default=0.0)
 parser.add_argument("--log_interval", type=int, default=400)
 parser.add_argument("--project", type=bool, default=False)
+parser.add_argument("--name", type=str, default="nameless")
 args = parser.parse_args()
 
 device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
@@ -265,11 +266,12 @@ run = wandb.init(
     project="random_label_MNIST",
     entity="sheerio",
     group="continual",
-    name=args.activation,
+    name=args.name,
     config={
         "activation": args.activation,
         "weight_decay": args.weight_decay,
         "batch_size": args.batch_size,
+        "random_seed": args.seed,
     },
 )
 
@@ -305,11 +307,11 @@ for i in range(10, 10 + args.runs):
             outputs = model(inputs)
             loss = criterion(outputs, labels)
             params = [p for p in model.parameters() if p.requires_grad]
-            eigs = estimate_hessian_topk(model, loss, params, k=5)
-            hess_avg = sum(eigs) / len(eigs)
-            use_vals = {f"use_{name}": compute_use_for_activation(h) for name, h in activations.items()}
-            run.log({"hessian_avg_top_5": hess_avg, **use_vals})
             old_params = [p.data.clone() for p in params]
+            if total_updates % args.log_interval == 0:
+                eigs = estimate_hessian_topk(model, loss, params, k=5)
+                hess_avg = sum(eigs) / len(eigs)
+                hess_avgs = {"Hessian_avg": hess_avg}
             loss.backward()
             optimizer.step()
             deltas = torch.cat([(p.data - old).view(-1).abs() for p, old in zip(params, old_params)])
@@ -345,11 +347,15 @@ for i in range(10, 10 + args.runs):
                 j = (torch.cumsum(s, 0) >= cut).nonzero()[0].item() + 1
                 rep_norm = j / float(h.shape[1])
                 rep_effective_rank = -rep_norm
+
+                use_vals = {f"use_{name}": compute_use_for_activation(h) for name, h in activations.items()}
                 run.log({
                     "loss": loss.item(),
                     "update_norm": update_norm,
                     "weight_norm": weight_norm,
                     "rep_effective_rank": rep_effective_rank,
+                    **use_vals,
+                    **hess_avgs,
                 })
     model.eval()
     eval_loader = data.DataLoader(train_dataset_c, batch_size=args.batch_size, shuffle=False, num_workers=1)
