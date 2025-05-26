@@ -32,7 +32,7 @@ parser.add_argument(
     "--activation",
     type=str,
     default="relu",
-    choices=["relu", "leaky_relu", "tanh", "identity", "crelu"],
+    choices=["relu", "leaky_relu", "tanh", "identity", "crelu", "fourier", "adalin"],
 )
 parser.add_argument("--seed", type=int, default=0)
 parser.add_argument("--weight_decay", type=float, default=0.0)
@@ -42,6 +42,9 @@ parser.add_argument("--batch_size", type=int, default=256)
 parser.add_argument("--dropout", type=float, default=0.0)
 parser.add_argument("--log_interval", type=int, default=400)
 parser.add_argument("--project", type=bool, default=False)
+parser.add_argument("--name", type=str, default="nameless")
+parser.add_argument("--alpha",type=float,default=0.5,
+    help="mixing weight for α-linearization: phi(z)=alpha*z + (1-alpha)*ReLU(z)")
 args = parser.parse_args()
 
 device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
@@ -128,7 +131,7 @@ class MLP(nn.Module):
     def __init__(self, i, h, o):
         super().__init__()
         self.fc1 = nn.Linear(i, h)
-        if args.activation == "crelu":
+        if args.activation == "crelu" or args.activation == "fourier":
             self.fc2 = nn.Linear(2 * h, h)
             self.fc3 = nn.Linear(2 * h, h)
             self.fc4 = nn.Linear(2 * h, o)
@@ -156,6 +159,14 @@ class MLP(nn.Module):
             x = torch.cat([F.relu(x2_out), F.relu(-x2_out)], dim=1)
             x3_out = self.fc3(x)
             x = torch.cat([F.relu(x3_out), F.relu(-x3_out)], dim=1)
+        elif args.activation == "adalin":
+            x = args.alpha * self.fc1(x) + (1 - args.alpha) * F.relu(self.fc1(x))
+            x = args.alpha * self.fc2(x) + (1 - args.alpha) * F.relu(self.fc2(x))
+            x = args.alpha * self.fc3(x) + (1 - args.alpha) * F.relu(self.fc3(x))
+        elif args.activation == "fourier":
+            x = torch.cat([torch.sin(self.fc1(x*5.0)), torch.cos(self.fc1(x*5.0))], dim=1)
+            x = torch.cat([torch.sin(self.fc2(x*5.0)), torch.cos(self.fc2(x*5.0))], dim=1)
+            x = torch.cat([torch.sin(self.fc3(x*5.0)), torch.cos(self.fc3(x*5.0))], dim=1)
         else:
             x = self.fc1(x)
             x = self.fc2(x)
@@ -265,11 +276,12 @@ run = wandb.init(
     project="random_label_MNIST",
     entity="sheerio",
     group="continual",
-    name=args.activation,
+    name=args.name,
     config={
         "activation": args.activation,
         "weight_decay": args.weight_decay,
         "batch_size": args.batch_size,
+        "random_seed": args.seed,
     },
 )
 
@@ -305,11 +317,11 @@ for i in range(10, 10 + args.runs):
             outputs = model(inputs)
             loss = criterion(outputs, labels)
             params = [p for p in model.parameters() if p.requires_grad]
-            eigs = estimate_hessian_topk(model, loss, params, k=5)
-            hess_avg = sum(eigs) / len(eigs)
-            use_vals = {f"use_{name}": compute_use_for_activation(h) for name, h in activations.items()}
-            run.log({"hessian_avg_top_5": hess_avg, **use_vals})
             old_params = [p.data.clone() for p in params]
+            if total_updates % args.log_interval == 0:
+                eigs = estimate_hessian_topk(model, loss, params, k=5)
+                hess_avg = sum(eigs) / len(eigs)
+                hess_avgs = {"Hessian_avg": hess_avg}
             loss.backward()
             optimizer.step()
             deltas = torch.cat([(p.data - old).view(-1).abs() for p, old in zip(params, old_params)])
@@ -336,6 +348,14 @@ for i in range(10, 10 + args.runs):
                     h = torch.cat([F.relu(model.fc1(h_in)), F.relu(-model.fc1(h_in))], dim=1)
                     h = torch.cat([F.relu(model.fc2(h)), F.relu(-model.fc2(h))], dim=1)
                     h = torch.cat([F.relu(model.fc3(h)), F.relu(-model.fc3(h))], dim=1)
+                elif args.activation == "fourier":
+                    h = torch.cat([torch.sin(model.fc1(h_in)), torch.cos(model.fc1(h_in))], dim=1)
+                    h = torch.cat([torch.sin(model.fc2(h)), torch.cos(model.fc2(h))], dim=1)
+                    h = torch.cat([torch.sin(model.fc3(h)), torch.cos(model.fc3(h))], dim=1)
+                elif args.activation == "adalin":
+                    h = args.alpha * model.fc1(h_in) + (1 - args.alpha) * F.relu(model.fc1(h_in))
+                    h = args.alpha * model.fc2(h) + (1 - args.alpha) * F.relu(model.fc2(h))
+                    h = args.alpha * model.fc3(h) + (1 - args.alpha) * F.relu(model.fc3(h))
                 else:
                     h = model.fc1(h_in)
                     h = model.fc2(h)
@@ -345,11 +365,15 @@ for i in range(10, 10 + args.runs):
                 j = (torch.cumsum(s, 0) >= cut).nonzero()[0].item() + 1
                 rep_norm = j / float(h.shape[1])
                 rep_effective_rank = -rep_norm
+
+                use_vals = {f"use_{name}": compute_use_for_activation(h) for name, h in activations.items()}
                 run.log({
                     "loss": loss.item(),
                     "update_norm": update_norm,
                     "weight_norm": weight_norm,
                     "rep_effective_rank": rep_effective_rank,
+                    **use_vals,
+                    **hess_avgs,
                 })
     model.eval()
     eval_loader = data.DataLoader(train_dataset_c, batch_size=args.batch_size, shuffle=False, num_workers=1)
@@ -387,6 +411,14 @@ for i in range(10, 10 + args.runs):
         h = torch.cat([F.relu(model.fc1(inputs)), F.relu(-model.fc1(inputs))], dim=1)
         h = torch.cat([F.relu(model.fc2(h)), F.relu(-model.fc2(h))], dim=1)
         h = torch.cat([F.relu(model.fc3(h)), F.relu(-model.fc3(h))], dim=1)
+    elif args.activation == "fourier":
+        h = torch.cat([torch.sin(model.fc1(inputs)), torch.cos(model.fc1(inputs))], dim=1)
+        h = torch.cat([torch.sin(model.fc2(h)), torch.cos(model.fc2(h))], dim=1)
+        h = torch.cat([torch.sin(model.fc3(h)), torch.cos(model.fc3(h))], dim=1)
+    elif args.activation == "adalin":
+        h = args.alpha * model.fc1(inputs) + (1 - args.alpha) * F.relu(model.fc1(inputs))
+        h = args.alpha * model.fc2(h) + (1 - args.alpha) * F.relu(model.fc2(h))
+        h = args.alpha * model.fc3(h) + (1 - args.alpha) * F.relu(model.fc3(h))
     else:
         h = model.fc1(inputs)
         h = model.fc2(h)
@@ -416,6 +448,14 @@ for i in range(10, 10 + args.runs):
                 h = torch.cat([F.relu(model.fc1(h_in)), F.relu(-model.fc1(h_in))], dim=1)
                 h = torch.cat([F.relu(model.fc2(h)), F.relu(-model.fc2(h))], dim=1)
                 h = torch.cat([F.relu(model.fc3(h)), F.relu(-model.fc3(h))], dim=1)
+            elif args.activation == "fourier":
+                h = torch.cat([torch.sin(model.fc1(h_in)), torch.cos(model.fc1(h_in))], dim=1)
+                h = torch.cat([torch.sin(model.fc2(h)), torch.cos(model.fc2(h))], dim=1)
+                h = torch.cat([torch.sin(model.fc3(h)), torch.cos(model.fc3(h))], dim=1)
+            elif args.activation == "adalin":
+                h = args.alpha * model.fc1(inputs) + (1 - args.alpha) * F.relu(model.fc1(inputs))
+                h = args.alpha * model.fc2(h) + (1 - args.alpha) * F.relu(model.fc2(h))
+                h = args.alpha * model.fc3(h) + (1 - args.alpha) * F.relu(model.fc3(h))
             else:
                 h = model.fc1(inputs)
                 h = model.fc2(h)
