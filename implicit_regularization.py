@@ -41,7 +41,7 @@ parser.add_argument("--batch_size", type=int, default=256)
 parser.add_argument("--dropout", type=float, default=0.0)
 parser.add_argument("--log_interval", type=int, default=400)
 parser.add_argument("--project", type=bool, default=False)
-parser.add_argument("--name", type=str, default="nameless")
+parser.add_argument("--name", type=str, default="")
 parser.add_argument(
     "--alpha",
     type=float,
@@ -168,6 +168,17 @@ def compute_use_for_activation(h):
         eps = 1e-12
         ent = -(pos * (pos + eps).log() + (1 - pos) * (1 - pos + eps).log())
         return ent.mean().item()
+
+
+def power_iteration(W, iters=1):
+    device = W.device
+    v = torch.randn(W.shape[1], device=device)
+    v = v / (v.norm() + 1e-12)
+    for _ in range(iters):
+        v = W.t() @ (W @ v)
+        v = v / (v.norm() + 1e-12)
+    sigma = (W @ v).norm()
+    return sigma
 
 
 class MLP(nn.Module):
@@ -360,7 +371,7 @@ run = wandb.init(
     project="random_label_MNIST",
     entity="sheerio",
     group="continual",
-    name=f"{args.name}_{args.reg}",
+    name=f"{args.name}+{args.reg}",
     config={
         "activation": args.activation,
         "reg": args.reg,
@@ -422,7 +433,7 @@ for i in range(10, 10 + args.runs):
             elif args.reg == "spectral":
                 for name, p in model.named_parameters():
                     if p.requires_grad and p.ndim >= 2:
-                        sigma_1 = torch.linalg.svdvals(p)[0]
+                        sigma_1 = power_iteration(p, iters=1)
                         reg_term += (sigma_1.pow(args.spectral_k) - 1.0).pow(2)
                 reg_term *= args.spectral_lambda
 
@@ -516,10 +527,8 @@ for i in range(10, 10 + args.runs):
                 }
                 # for mname, module in model.named_modules():
                 #     if isinstance(module, nn.Linear):
-                #         sigma_1 = torch.linalg.svdvals(module.weight)[0].item()
+                #         sigma_1 = power_iteration(module.weight, iters=1)
                 #         log_dict[f"spec_norm/{mname}.weight"] = sigma_1
-                if args.reg == "spectral":
-                    log_dict["spec_reg"] = spec_reg.item()
                 run.log(log_dict)
     model.eval()
     eval_loader = data.DataLoader(
