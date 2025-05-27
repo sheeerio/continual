@@ -42,22 +42,40 @@ parser.add_argument("--dropout", type=float, default=0.0)
 parser.add_argument("--log_interval", type=int, default=400)
 parser.add_argument("--project", type=bool, default=False)
 parser.add_argument("--name", type=str, default="nameless")
-parser.add_argument("--alpha",type=float,default=0.5,
-    help="mixing weight for adalin: phi(z)=alpha*z + (1-alpha)*ReLU(z)")
-parser.add_argument("--l2_lambda", type=float, default=0.0,
-     help="lambda coefficient for L2 (weight-decay) or L2 (init) regularization")
-parser.add_argument("--spectral_lambda", type=float, default=0.0,
-     help="lambda coefficient for spectral regularization")
-parser.add_argument("--spectral_k", type=int, default=2,
-     help="exponent k for spectral regularizer")
-parser.add_argument("--reg", type=str, default="l2",
-     choices=["l2", "l2_init", "wass", "spectral"],
-     help="which regularizer to apply")
+parser.add_argument(
+    "--alpha",
+    type=float,
+    default=0.5,
+    help="mixing weight for adalin: phi(z)=alpha*z + (1-alpha)*ReLU(z)",
+)
+parser.add_argument(
+    "--l2_lambda",
+    type=float,
+    default=0.0,
+    help="lambda coefficient for L2 (weight-decay) or L2 (init) regularization",
+)
+parser.add_argument(
+    "--spectral_lambda",
+    type=float,
+    default=0.0,
+    help="lambda coefficient for spectral regularization",
+)
+parser.add_argument(
+    "--spectral_k", type=int, default=2, help="exponent k for spectral regularizer"
+)
+parser.add_argument(
+    "--reg",
+    type=str,
+    default="l2",
+    choices=["l2", "l2_init", "wass", "spectral"],
+    help="which regularizer to apply",
+)
 
 
 args = parser.parse_args()
 
 device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
+
 
 def set_seed(s):
     random.seed(s)
@@ -67,6 +85,7 @@ def set_seed(s):
         torch.cuda.manual_seed(s)
         torch.cuda.manual_seed_all(s)
 
+
 def randomize_targets(dataset, p):
     n = len(dataset.targets)
     k = int(p * n)
@@ -75,11 +94,14 @@ def randomize_targets(dataset, p):
         dataset.targets[i] = random.randint(0, 9)
     return dataset
 
-P = torch.randn(36, 28*28) / (36**0.5)
+
+P = torch.randn(36, 28 * 28) / (36**0.5)
+
 
 def stochastic_project(x):
     x = x.view(-1)
     return P @ x
+
 
 def empirical_fischer_rank(model, dataset, device, thresh=0.99, max_m=100):
     loader = data.DataLoader(dataset, batch_size=1, shuffle=False)
@@ -107,14 +129,17 @@ def empirical_fischer_rank(model, dataset, device, thresh=0.99, max_m=100):
     j = (cumsum / total >= thresh).nonzero()[0].item() + 1
     return j / float(m)
 
+
 def estimate_hessian_topk(model, loss, params, k=5, iters=10):
     grads = torch.autograd.grad(loss, params, create_graph=True)
     flat_grad = torch.cat([g.contiguous().view(-1) for g in grads])
     n = flat_grad.numel()
+
     def hvp(v):
         g_v = (flat_grad * v).sum()
         hv = torch.autograd.grad(g_v, params, retain_graph=True)
         return torch.cat([h.contiguous().view(-1) for h in hv]).detach()
+
     eigs = []
     vs = []
     for _ in range(k):
@@ -130,12 +155,14 @@ def estimate_hessian_topk(model, loss, params, k=5, iters=10):
         vs.append(v)
     return eigs
 
+
 def compute_use_for_activation(h):
     with torch.no_grad():
         pos = (h > 0).float().mean(dim=0)
         eps = 1e-12
         ent = -(pos * (pos + eps).log() + (1 - pos) * (1 - pos + eps).log())
         return ent.mean().item()
+
 
 class MLP(nn.Module):
     def __init__(self, i, h, o):
@@ -149,6 +176,7 @@ class MLP(nn.Module):
             self.fc2 = nn.Linear(h, h)
             self.fc3 = nn.Linear(h, h)
             self.fc4 = nn.Linear(h, o)
+
     def forward(self, x):
         if args.activation == "relu":
             x = F.relu(self.fc1(x))
@@ -174,14 +202,21 @@ class MLP(nn.Module):
             x = args.alpha * self.fc2(x) + (1 - args.alpha) * F.relu(self.fc2(x))
             x = args.alpha * self.fc3(x) + (1 - args.alpha) * F.relu(self.fc3(x))
         elif args.activation == "fourier":
-            x = torch.cat([torch.sin(self.fc1(x*5.0)), torch.cos(self.fc1(x*5.0))], dim=1)
-            x = torch.cat([torch.sin(self.fc2(x*5.0)), torch.cos(self.fc2(x*5.0))], dim=1)
-            x = torch.cat([torch.sin(self.fc3(x*5.0)), torch.cos(self.fc3(x*5.0))], dim=1)
+            x = torch.cat(
+                [torch.sin(self.fc1(x * 5.0)), torch.cos(self.fc1(x * 5.0))], dim=1
+            )
+            x = torch.cat(
+                [torch.sin(self.fc2(x * 5.0)), torch.cos(self.fc2(x * 5.0))], dim=1
+            )
+            x = torch.cat(
+                [torch.sin(self.fc3(x * 5.0)), torch.cos(self.fc3(x * 5.0))], dim=1
+            )
         else:
             x = self.fc1(x)
             x = self.fc2(x)
             x = self.fc3(x)
         return self.fc4(x)
+
 
 class LayerNormMLP(nn.Module):
     def __init__(self, i, h, o):
@@ -197,11 +232,13 @@ class LayerNormMLP(nn.Module):
             self.ln1.bias.fill_(0)
             self.ln2.bias.fill_(0)
             self.ln3.bias.fill_(0)
+
     def forward(self, x):
         x = F.relu(self.ln1(self.fc1(x)))
         x = F.relu(self.ln2(self.fc2(x)))
         x = F.relu(self.ln3(self.fc3(x)))
         return self.fc4(x)
+
 
 class BatchNormMLP(nn.Module):
     def __init__(self, i, h, o):
@@ -213,11 +250,13 @@ class BatchNormMLP(nn.Module):
         self.bn1 = nn.BatchNorm1d(h)
         self.bn2 = nn.BatchNorm1d(h)
         self.bn3 = nn.BatchNorm1d(h)
+
     def forward(self, x):
         x = F.relu(self.bn1(self.fc1(x)))
         x = F.relu(self.bn2(self.fc2(x)))
         x = F.relu(self.bn3(self.fc3(x)))
         return self.fc4(x)
+
 
 class LeakyLayerNormMLP(nn.Module):
     def __init__(self, i, h, o):
@@ -227,10 +266,12 @@ class LeakyLayerNormMLP(nn.Module):
         self.fc3 = nn.Linear(h, o)
         self.ln1 = nn.LayerNorm(h)
         self.ln2 = nn.LayerNorm(h)
+
     def forward(self, x):
         x = F.leaky_relu(self.ln1(self.fc1(x)))
         x = F.leaky_relu(self.ln2(self.fc2(x)))
         return self.fc3(x)
+
 
 class LeakyKaimingLayerNormMLP(nn.Module):
     def __init__(self, i, h, o):
@@ -240,19 +281,27 @@ class LeakyKaimingLayerNormMLP(nn.Module):
         self.fc3 = nn.Linear(h, o)
         self.ln1 = nn.LayerNorm(h)
         self.ln2 = nn.LayerNorm(h)
-        torch.nn.init.kaiming_uniform_(self.fc1.weight, a=0.01, nonlinearity="leaky_relu")
-        torch.nn.init.kaiming_uniform_(self.fc2.weight, a=0.01, nonlinearity="leaky_relu")
+        torch.nn.init.kaiming_uniform_(
+            self.fc1.weight, a=0.01, nonlinearity="leaky_relu"
+        )
+        torch.nn.init.kaiming_uniform_(
+            self.fc2.weight, a=0.01, nonlinearity="leaky_relu"
+        )
+
     def forward(self, x):
         x = F.leaky_relu(self.ln1(self.fc1(x)))
         x = F.leaky_relu(self.ln2(self.fc2(x)))
         return self.fc3(x)
 
+
 set_seed(args.seed)
 train_dataset = MNIST(root="../data", train=True, download=True)
 DATA_MEAN = (train_dataset.data / 255.0).mean(axis=(0, 1, 2))
 DATA_STD = (train_dataset.data / 255.0).std(axis=(0, 1, 2))
-tf = transforms.Compose([transforms.ToTensor(), transforms.Normalize(mean=DATA_MEAN, std=DATA_STD)])
-input_size = 28*28
+tf = transforms.Compose(
+    [transforms.ToTensor(), transforms.Normalize(mean=DATA_MEAN, std=DATA_STD)]
+)
+input_size = 28 * 28
 h = 512
 train_dataset = MNIST(root="../data", train=True, download=True, transform=tf)
 test_dataset = MNIST(root="../data", train=False, download=True, transform=tf)
@@ -269,22 +318,25 @@ elif args.model == "LeakyKaimingLayerNormMLP":
     model = LeakyKaimingLayerNormMLP(input_size, h, 10).to(device)
 elif args.model == "LinearNet":
     from torch.nn import Identity
+
     model = nn.Sequential(nn.Flatten(), Identity()).to(device)
 else:
     model = MLP(input_size, h, 10).to(device)
 
 # for l2 init
 init_params = {
-    name: p.data.clone()
-    for name, p in model.named_parameters()
-    if p.requires_grad
+    name: p.data.clone() for name, p in model.named_parameters() if p.requires_grad
 }
 
 activations = {}
+
+
 def save_activations(name):
     def hook(m, inp, out):
         activations[name] = out
+
     return hook
+
 
 model.fc1.register_forward_hook(save_activations("l1"))
 model.fc2.register_forward_hook(save_activations("l2"))
@@ -347,7 +399,7 @@ for i in range(10, 10 + args.runs):
                 for name, p in model.named_parameters():
                     if p.requires_grad:
                         p0 = init_params[name]
-                        reg_term += (p-p0).pow(2).sum()
+                        reg_term += (p - p0).pow(2).sum()
                 reg_term *= args.l2_lambda
             elif args.reg == "wass":
                 # TODO: implement Wasserstein‐based penalty
@@ -360,7 +412,7 @@ for i in range(10, 10 + args.runs):
                         sigma_1 = torch.linalg.svdvals(p)[0]
                         spec_reg += (sigma_1.pow(args.spectral_k) - 1.0).pow(2)
                 reg_term *= spec_reg
-            
+
             loss = base_loss + reg_term
             params = [p for p in model.parameters() if p.requires_grad]
             old_params = [p.data.clone() for p in params]
@@ -370,7 +422,9 @@ for i in range(10, 10 + args.runs):
                 hess_avgs = {"Hessian_avg": hess_avg}
             loss.backward()
             optimizer.step()
-            deltas = torch.cat([(p.data - old).view(-1).abs() for p, old in zip(params, old_params)])
+            deltas = torch.cat(
+                [(p.data - old).view(-1).abs() for p, old in zip(params, old_params)]
+            )
             update_norm = deltas.mean().item()
             sum_update_norm += update_norm
             total_updates += 1
@@ -400,17 +454,31 @@ for i in range(10, 10 + args.runs):
                     h = torch.tanh(model.fc2(h))
                     h = torch.tanh(model.fc3(h))
                 elif args.activation == "crelu":
-                    h = torch.cat([F.relu(model.fc1(h_in)), F.relu(-model.fc1(h_in))], dim=1)
+                    h = torch.cat(
+                        [F.relu(model.fc1(h_in)), F.relu(-model.fc1(h_in))], dim=1
+                    )
                     h = torch.cat([F.relu(model.fc2(h)), F.relu(-model.fc2(h))], dim=1)
                     h = torch.cat([F.relu(model.fc3(h)), F.relu(-model.fc3(h))], dim=1)
                 elif args.activation == "fourier":
-                    h = torch.cat([torch.sin(model.fc1(h_in)), torch.cos(model.fc1(h_in))], dim=1)
-                    h = torch.cat([torch.sin(model.fc2(h)), torch.cos(model.fc2(h))], dim=1)
-                    h = torch.cat([torch.sin(model.fc3(h)), torch.cos(model.fc3(h))], dim=1)
+                    h = torch.cat(
+                        [torch.sin(model.fc1(h_in)), torch.cos(model.fc1(h_in))], dim=1
+                    )
+                    h = torch.cat(
+                        [torch.sin(model.fc2(h)), torch.cos(model.fc2(h))], dim=1
+                    )
+                    h = torch.cat(
+                        [torch.sin(model.fc3(h)), torch.cos(model.fc3(h))], dim=1
+                    )
                 elif args.activation == "adalin":
-                    h = args.alpha * model.fc1(h_in) + (1 - args.alpha) * F.relu(model.fc1(h_in))
-                    h = args.alpha * model.fc2(h) + (1 - args.alpha) * F.relu(model.fc2(h))
-                    h = args.alpha * model.fc3(h) + (1 - args.alpha) * F.relu(model.fc3(h))
+                    h = args.alpha * model.fc1(h_in) + (1 - args.alpha) * F.relu(
+                        model.fc1(h_in)
+                    )
+                    h = args.alpha * model.fc2(h) + (1 - args.alpha) * F.relu(
+                        model.fc2(h)
+                    )
+                    h = args.alpha * model.fc3(h) + (1 - args.alpha) * F.relu(
+                        model.fc3(h)
+                    )
                 else:
                     h = model.fc1(h_in)
                     h = model.fc2(h)
@@ -421,7 +489,10 @@ for i in range(10, 10 + args.runs):
                 rep_norm = j / float(h.shape[1])
                 rep_effective_rank = -rep_norm
 
-                use_vals = {f"use_{name}": compute_use_for_activation(h) for name, h in activations.items()}
+                use_vals = {
+                    f"use_{name}": compute_use_for_activation(h)
+                    for name, h in activations.items()
+                }
                 log_dict = {
                     "loss": loss.item(),
                     "update_norm": update_norm,
@@ -438,7 +509,9 @@ for i in range(10, 10 + args.runs):
                     log_dict["spec_reg"] = spec_reg.item()
                 run.log(log_dict)
     model.eval()
-    eval_loader = data.DataLoader(train_dataset_c, batch_size=args.batch_size, shuffle=False, num_workers=1)
+    eval_loader = data.DataLoader(
+        train_dataset_c, batch_size=args.batch_size, shuffle=False, num_workers=1
+    )
     total_loss = 0.0
     total_samples = 0
     with torch.no_grad():
@@ -483,11 +556,15 @@ for i in range(10, 10 + args.runs):
         h = torch.cat([F.relu(model.fc2(h)), F.relu(-model.fc2(h))], dim=1)
         h = torch.cat([F.relu(model.fc3(h)), F.relu(-model.fc3(h))], dim=1)
     elif args.activation == "fourier":
-        h = torch.cat([torch.sin(model.fc1(inputs)), torch.cos(model.fc1(inputs))], dim=1)
+        h = torch.cat(
+            [torch.sin(model.fc1(inputs)), torch.cos(model.fc1(inputs))], dim=1
+        )
         h = torch.cat([torch.sin(model.fc2(h)), torch.cos(model.fc2(h))], dim=1)
         h = torch.cat([torch.sin(model.fc3(h)), torch.cos(model.fc3(h))], dim=1)
     elif args.activation == "adalin":
-        h = args.alpha * model.fc1(inputs) + (1 - args.alpha) * F.relu(model.fc1(inputs))
+        h = args.alpha * model.fc1(inputs) + (1 - args.alpha) * F.relu(
+            model.fc1(inputs)
+        )
         h = args.alpha * model.fc2(h) + (1 - args.alpha) * F.relu(model.fc2(h))
         h = args.alpha * model.fc3(h) + (1 - args.alpha) * F.relu(model.fc3(h))
     else:
@@ -525,15 +602,21 @@ for i in range(10, 10 + args.runs):
                 h = torch.tanh(model.fc2(h))
                 h = torch.tanh(model.fc3(h))
             elif args.activation == "crelu":
-                h = torch.cat([F.relu(model.fc1(h_in)), F.relu(-model.fc1(h_in))], dim=1)
+                h = torch.cat(
+                    [F.relu(model.fc1(h_in)), F.relu(-model.fc1(h_in))], dim=1
+                )
                 h = torch.cat([F.relu(model.fc2(h)), F.relu(-model.fc2(h))], dim=1)
                 h = torch.cat([F.relu(model.fc3(h)), F.relu(-model.fc3(h))], dim=1)
             elif args.activation == "fourier":
-                h = torch.cat([torch.sin(model.fc1(h_in)), torch.cos(model.fc1(h_in))], dim=1)
+                h = torch.cat(
+                    [torch.sin(model.fc1(h_in)), torch.cos(model.fc1(h_in))], dim=1
+                )
                 h = torch.cat([torch.sin(model.fc2(h)), torch.cos(model.fc2(h))], dim=1)
                 h = torch.cat([torch.sin(model.fc3(h)), torch.cos(model.fc3(h))], dim=1)
             elif args.activation == "adalin":
-                h = args.alpha * model.fc1(inputs) + (1 - args.alpha) * F.relu(model.fc1(inputs))
+                h = args.alpha * model.fc1(inputs) + (1 - args.alpha) * F.relu(
+                    model.fc1(inputs)
+                )
                 h = args.alpha * model.fc2(h) + (1 - args.alpha) * F.relu(model.fc2(h))
                 h = args.alpha * model.fc3(h) + (1 - args.alpha) * F.relu(model.fc3(h))
             else:
@@ -551,13 +634,15 @@ for i in range(10, 10 + args.runs):
     p = abs_means / abs_means.sum()
     entropy = -(p * (p + eps).log()).sum().item()
     dormancy = -entropy
-    run.log({
-        "J": J,
-        "param_norm": param_norm,
-        "average_update_norm": average_update_norm,
-        "effective_rank": effective_rank,
-        "dormancy": dormancy,
-    })
+    run.log(
+        {
+            "J": J,
+            "param_norm": param_norm,
+            "average_update_norm": average_update_norm,
+            "effective_rank": effective_rank,
+            "dormancy": dormancy,
+        }
+    )
     res = results[args.activation]
     res["batch_error"].append(J)
     res["param_norm"].append(param_norm)
