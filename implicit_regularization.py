@@ -13,6 +13,11 @@ import argparse
 import wandb
 import matplotlib.pyplot as plt
 
+from collections import deque
+
+W = 10  # Window size for sharpness tracking
+K = 20
+
 parser = argparse.ArgumentParser()
 parser.add_argument(
     "--model",
@@ -35,7 +40,7 @@ parser.add_argument(
     "--dataset",
     type=str,
     default="MNIST",
-    choices=["MNIST", "CIFAR10", "PermutedMNIST", "Shuffle_CIFAR"],
+    choices=["MNIST", "CIFAR10", "PermutedMNIST", "Shuffle_CIFAR", "Tiny_ImageNet"],
 )
 parser.add_argument(
     "--activation",
@@ -50,6 +55,8 @@ parser.add_argument(
         "fourier",
         "adalin",
         "cleaky_relu",
+        "softplus",
+        "swish",
     ],
 )
 parser.add_argument("--seed", type=int, default=0)
@@ -66,13 +73,49 @@ parser.add_argument("--l2_lambda", type=float, default=0.0)
 parser.add_argument("--spectral_lambda", type=float, default=0.0)
 parser.add_argument("--spectral_k", type=int, default=2)
 parser.add_argument(
-    "--reg", type=str, default="l2", choices=["l2", "l2_init", "wass", "spectral"]
+    "--reg",
+    type=str,
+    default="l2",
+    choices=["l2", "l2_init", "wass", "spectral", "shrink_perturb"],
 )
 parser.add_argument("--wass_lambda", type=float, default=0.0)
 parser.add_argument("--exp_name", type=str, default="")
+parser.add_argument(
+    "--initialization",
+    type=str,
+    default="kaiming",
+    choices=["kaiming", "xavier", "normal", "uniform"],
+)
+parser.add_argument(
+    "--sp_weight_decay",
+    type=float,
+    default=0.0,
+    help="Shrink factor (lambda) for shrink-and-perturb (weight decay per step)",
+)
+parser.add_argument(
+    "--sp_noise_std",
+    type=float,
+    default=0.0,
+    help="Standard deviation (gamma) of Gaussian noise for shrink-and-perturb",
+)
+parser.add_argument(
+    "--step_size_schedule",
+    type=str,
+    default="constant",
+    choices=["constant", "linear", "exponential", "polynomial", "cosine"],
+)
 args = parser.parse_args()
 
 device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
+
+map = {
+    "relu": "relu",
+    "leaky_relu": "leaky_relu",
+    "tanh": "tanh",
+    "identity": "linear",
+    "crelu": "relu",
+    "adalin": "leaky_relu",
+}
 
 
 def set_seed(s):
@@ -210,10 +253,22 @@ class MLP(nn.Module):
             self.fc2 = nn.Linear(h, h)
             self.fc3 = nn.Linear(h, h)
             self.fc4 = nn.Linear(h, o)
-
-        # for m in self.modules():
-        #     if isinstance(m, nn.Linear):
-        #         nn.init.kaiming_uniform_(m.weight, nonlinearity=args.activation if args.activation != "identity" else "linear")
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                if args.initialization == "kaiming":
+                    nn.init.kaiming_uniform_(
+                        m.weight,
+                        a=args.alpha if args.activation == "adalin" else 0,
+                        nonlinearity=map[args.activation],
+                    )
+                elif args.initialization == "xavier":
+                    nn.init.xavier_uniform_(m.weight)
+                elif args.initialization == "normal":
+                    nn.init.normal_(m.weight, mean=0.0, std=0.01)
+                elif args.initialization == "uniform":
+                    nn.init.uniform_(m.weight, a=-0.1, b=0.1)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
 
     def forward(self, x):
         if args.activation == "relu":
@@ -256,6 +311,14 @@ class MLP(nn.Module):
             x = torch.cat(
                 [torch.sin(self.fc3(x * 5.0)), torch.cos(self.fc3(x * 5.0))], 1
             )
+        elif args.activation == "softplus":
+            x = F.softplus(self.fc1(x))
+            x = F.softplus(self.fc2(x))
+            x = F.softplus(self.fc3(x))
+        elif args.activation == "swish":
+            x = self.fc1(x) * torch.sigmoid(self.fc1(x))
+            x = self.fc2(x) * torch.sigmoid(self.fc2(x))
+            x = self.fc3(x) * torch.sigmoid(self.fc3(x))
         else:
             x = self.fc1(x)
             x = self.fc2(x)
@@ -285,20 +348,75 @@ class BatchNormMLP(nn.Module):
     def __init__(self, i, h, o):
         super().__init__()
         self.fc1 = nn.Linear(i, h)
-        self.fc2 = nn.Linear(h, h)
-        self.fc3 = nn.Linear(h, h)
-        self.fc4 = nn.Linear(h, h)
-        self.fc5 = nn.Linear(h, o)
         self.bn1 = nn.BatchNorm1d(h)
+        if args.activation in ("crelu", "fourier", "cleaky_relu"):
+            self.fc2 = nn.Linear(2 * h, h)
+            self.fc3 = nn.Linear(2 * h, h)
+            self.fc4 = nn.Linear(2 * h, h)
+            self.fc5 = nn.Linear(2 * h, o)
+            self.bn2 = nn.BatchNorm1d(2 * h)
+            self.bn3 = nn.BatchNorm1d(2 * h)
+            self.bn4 = nn.BatchNorm1d(h)
+        else:
+            self.fc2 = nn.Linear(h, h)
+            self.fc3 = nn.Linear(h, h)
+            self.fc4 = nn.Linear(h, h)
+            self.fc5 = nn.Linear(h, o)
         self.bn2 = nn.BatchNorm1d(h)
         self.bn3 = nn.BatchNorm1d(h)
         self.bn4 = nn.BatchNorm1d(h)
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                if args.initialization == "kaiming":
+                    nn.init.kaiming_uniform_(
+                        m.weight,
+                        a=args.alpha if args.activation == "adalin" else 0,
+                        nonlinearity=map[args.activation],
+                    )
+                elif args.initialization == "xavier":
+                    nn.init.xavier_uniform_(m.weight)
+                elif args.initialization == "normal":
+                    nn.init.normal_(m.weight, mean=0.0, std=0.01)
+                elif args.initialization == "uniform":
+                    nn.init.uniform_(m.weight, a=-0.1, b=0.1)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
 
     def forward(self, x):
-        x = F.relu(self.bn1(self.fc1(x)))
-        x = F.relu(self.bn2(self.fc2(x)))
-        x = F.relu(self.bn3(self.fc3(x)))
-        x = F.relu(self.bn4(self.fc4(x)))
+        if args.activation == "relu":
+            x = F.relu(self.bn1(self.fc1(x)))
+            x = F.relu(self.bn2(self.fc2(x)))
+            x = F.relu(self.bn3(self.fc3(x)))
+            x = F.relu(self.bn4(self.fc4(x)))
+        elif args.activation == "leaky_relu":
+            x = F.leaky_relu(self.bn1(self.fc1(x)))
+            x = F.leaky_relu(self.bn2(self.fc2(x)))
+            x = F.leaky_relu(self.bn3(self.fc3(x)))
+            x = F.leaky_relu(self.bn4(self.fc4(x)))
+        elif args.activation == "adalin":
+            x = F.leaky_relu(self.bn1(self.fc1(x)), negative_slope=args.alpha)
+            x = F.leaky_relu(self.bn2(self.fc2(x)), negative_slope=args.alpha)
+            x = F.leaky_relu(self.bn3(self.fc3(x)), negative_slope=args.alpha)
+            x = F.leaky_relu(self.bn4(self.fc4(x)), negative_slope=args.alpha)
+        elif args.activation == "crelu":
+            x1 = self.fc1(x)
+            x = torch.cat([F.relu(self.bn1(x1)), F.relu(-x1)], 1)
+            x2 = self.fc2(x)
+            x = torch.cat([F.relu(self.bn2(x2)), F.relu(-x2)], 1)
+            x3 = self.fc3(x)
+            x = torch.cat([F.relu(self.bn3(x3)), F.relu(-x3)], 1)
+            x4 = self.fc4(x)
+            x = torch.cat([F.relu(self.bn4(x4)), F.relu(-x4)], 1)
+        elif args.activation == "softplus":
+            x = F.softplus(self.bn1(self.fc1(x)))
+            x = F.softplus(self.bn2(self.fc2(x)))
+            x = F.softplus(self.bn3(self.fc3(x)))
+            x = F.softplus(self.bn4(self.fc4(x)))
+        elif args.activation == "swish":
+            x = self.fc1(x) * torch.sigmoid(self.bn1(self.fc1(x)))
+            x = self.fc2(x) * torch.sigmoid(self.bn2(self.fc2(x)))
+            x = self.fc3(x) * torch.sigmoid(self.bn3(self.fc3(x)))
+            x = self.fc4(x) * torch.sigmoid(self.bn4(self.fc4(x)))
         return self.fc5(x)
 
 
@@ -310,27 +428,6 @@ class LeakyLayerNormMLP(nn.Module):
         self.fc3 = nn.Linear(h, o)
         self.ln1 = nn.LayerNorm(h)
         self.ln2 = nn.LayerNorm(h)
-
-    def forward(self, x):
-        x = F.leaky_relu(self.ln1(self.fc1(x)))
-        x = F.leaky_relu(self.ln2(self.fc2(x)))
-        return self.fc3(x)
-
-
-class LeakyKaimingLayerNormMLP(nn.Module):
-    def __init__(self, i, h, o):
-        super().__init__()
-        self.fc1 = nn.Linear(i, h)
-        self.fc2 = nn.Linear(h, h)
-        self.fc3 = nn.Linear(h, o)
-        self.ln1 = nn.LayerNorm(h)
-        self.ln2 = nn.LayerNorm(h)
-        torch.nn.init.kaiming_uniform_(
-            self.fc1.weight, a=0.01, nonlinearity="leaky_relu"
-        )
-        torch.nn.init.kaiming_uniform_(
-            self.fc2.weight, a=0.01, nonlinearity="leaky_relu"
-        )
 
     def forward(self, x):
         x = F.leaky_relu(self.ln1(self.fc1(x)))
@@ -468,8 +565,25 @@ elif args.dataset == "Shuffle_CIFAR":
 
     test_dataset = CIFAR10(root="../data", train=False, download=True, transform=tf)
     in_ch, input_size = 3, 3 * 32 * 32
+elif args.dataset == "Tiny_ImageNet":
+    from torchvision.datasets import ImageNet
 
+    DATA_MEAN = (0.485, 0.456, 0.406)
+    DATA_STD = (0.229, 0.224, 0.225)
+    tf = transforms.Compose(
+        [
+            transforms.Resize((224, 224)),
+            transforms.ToTensor(),
+            transforms.Normalize(DATA_MEAN, DATA_STD),
+        ]
+    )
+    full = ImageNet(root="../data", split="train", download=True, transform=tf)
+    perm = torch.randperm(len(full))[:128000]
+    train_dataset = Subset(full, perm)
+    test_dataset = ImageNet(root="../data", split="val", download=True, transform=tf)
+    in_ch, input_size = 3, 3 * 224 * 224
 
+args.alpha = 0.01 if args.activation == "leaky_relu" else args.alpha
 hidden = 256
 if args.model == "MLP":
     model = MLP(input_size, hidden, 10).to(device)
@@ -523,8 +637,9 @@ else:
 criterion = nn.CrossEntropyLoss()
 wd = args.l2_lambda if args.reg == "l2" else 0.0
 optimizer = optim.Adam(model.parameters(), lr=1e-3, weight_decay=wd)
-# optimizer = optim.SGD(model.parameters(), lr=1e-2, weight_decay=wd)
+# optimizer = torch.optim.SGD(model.parameters(), lr=1e-2, momentum=0.9, weight_decay=wd)
 
+#
 run = wandb.init(
     project=f"random_label_{args.dataset}",
     entity="sheerio",
@@ -555,6 +670,11 @@ results = {
     }
 }
 for task in range(10, 10 + args.runs):
+    sharp_queue = deque(maxlen=W)
+    current_runlen = 0
+    step_within_task = 0
+    collapse_step_within_task = None
+
     if args.dataset == "PermutedMNIST":
         perm_tf = make_perm_tf(task - 10)
         train_dataset.dataset.transform = transforms.Compose(
@@ -579,13 +699,12 @@ for task in range(10, 10 + args.runs):
         )
 
     total_updates = 0
-    if total_updates % args.log_interval == 0:
-        hessian_rank = empirical_fischer_rank(model, train_dataset, device)
 
     model.train()
     sum_up = 0.0
     this_task_acc = 0.0
     for _ in range(args.epochs):
+        hessian_rank = empirical_fischer_rank(model, train_dataset, device)
         for x, y in loader:
             if args.model in ["CNN", "BatchNormCNN"]:
                 inputs = x.to(device)
@@ -617,11 +736,53 @@ for task in range(10, 10 + args.runs):
             loss = base + reg
             params = [p for p in model.parameters() if p.requires_grad]
             old = [p.data.clone() for p in params]
+
             if total_updates % args.log_interval == 0:
                 eigs = estimate_hessian_topk(model, loss, params, k=5)
-                hess_avgs = {"Hessian_avg": sum(eigs) / len(eigs)}
+                sharpness = eigs[0]
+
+                v_squares = []
+                for group in optimizer.param_groups:
+                    for p in group["params"]:
+                        state = optimizer.state[p]
+                        if "exp_avg_sq" in state:
+                            v_sq = state["exp_avg_sq"].detach()
+                            v_squares.append(v_sq.view(-1))
+                if len(v_squares) > 0:
+                    v_cat = torch.cat(v_squares)
+                    rms = torch.sqrt(v_cat.mean() + 1e-16)
+                    lr0 = optimizer.param_groups[0]["lr"]
+                    alpha_agg = lr0 / (rms + optimizer.param_groups[0]["eps"])
+                else:
+                    alpha_agg = optimizer.param_groups[0]["lr"]
+
+                norm_sharpness = sharpness * alpha_agg
+
+                sharp_queue.append(norm_sharpness)
+
+                lam_mean = sum(sharp_queue) / len(sharp_queue)
+                lam_std = (
+                    sum((x - lam_mean) ** 2 for x in sharp_queue) / len(sharp_queue)
+                ) ** 0.5
+                frac_above = sum(1 for x in sharp_queue if x > 2.0) / len(sharp_queue)
+
+                if norm_sharpness > 2.0:
+                    current_runlen += 1
+                else:
+                    current_runlen = 0
+
+                if collapse_step_within_task is None and current_runlen >= K:
+                    collapse_step_within_task = step_within_task
+
             loss.backward()
             optimizer.step()
+            # shrink perturb
+            if args.reg == "shrink_perturb":
+                for p in model.parameters():
+                    if p.requires_grad:
+                        p.data.mul_(1.0 - args.sp_weight_decay)
+                        p.data.add_(args.sp_noise_std * torch.randn_like(p.data))
+
             delta = torch.cat(
                 [(p.data - o).view(-1).abs() for p, o in zip(params, old)]
             )
@@ -629,22 +790,24 @@ for task in range(10, 10 + args.runs):
             sum_up += up_norm
             total_updates += 1
             if total_updates % args.log_interval == 0:
-                use_vals = {
-                    f"use_{name}": compute_use_for_activation(h)
-                    for name, h in activations.items()
-                }
-                avg_use_val = sum(use_vals.values()) / len(use_vals)
+                # use_vals = { f"use_{name}": compute_use_for_activation(h) for name, h in activations.items() }
+                # avg_use_val = sum(use_vals.values()) / len(use_vals)
                 wn = torch.cat([p.data.view(-1).abs() for p in params]).mean().item()
-                log = {"loss": loss.item(), "update_norm": up_norm, "weight_norm": wn}
                 log = {
                     "acc": acc,
                     "loss": loss.item(),
                     "update_norm": up_norm,
                     "weight_norm": wn,
-                    "average_use_val": avg_use_val,
+                    # "average_use_val": avg_use_val,
                     "hessian_rank": hessian_rank,
-                    **use_vals,
-                    **hess_avgs,
+                    "sharpness": sharpness,
+                    "norm_sharpness": norm_sharpness,
+                    "runlen": current_runlen,  # how many consecutive steps ≥ 2, within this task
+                    "frac_above": frac_above,  # fraction of last W steps ≥ 2, within this task
+                    "lam_mean": lam_mean,
+                    "lam_std": lam_std,
+                    # **use_vals,
+                    # **hess_avgs,
                 }
                 # if args.model not in ["CNN","BatchNormCNN"]:
                 #     h = activations["l1"]
