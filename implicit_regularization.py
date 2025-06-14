@@ -287,9 +287,7 @@ class MLP(nn.Module):
                     nn.init.kaiming_uniform_(
                         m.weight,
                         a=args.alpha if args.activation == "adalin" else 0,
-                        nonlinearity=(
-                            map[args.activation]
-                        ),
+                        nonlinearity=(map[args.activation]),
                     )
                 elif args.initialization == "xavier":
                     nn.init.xavier_uniform_(m.weight)
@@ -668,8 +666,10 @@ criterion = nn.CrossEntropyLoss()
 wd = args.l2_lambda if args.reg == "l2" else 0.0
 if args.optimizer == "adam":
     optimizer = optim.Adam(model.parameters(), lr=1e-3, weight_decay=wd)
-elif args.optimizer == "sgd": 
-    optimizer = torch.optim.SGD(model.parameters(), lr=1e-2, momentum=0.9, weight_decay=wd)
+elif args.optimizer == "sgd":
+    optimizer = torch.optim.SGD(
+        model.parameters(), lr=1e-2, momentum=0.9, weight_decay=wd
+    )
 
 #
 run = wandb.init(
@@ -701,7 +701,7 @@ results = {
         "dormancy": [],
     }
 }
-for task in range(10, 10+args.runs):
+for task in range(10, 10 + args.runs):
     sharp_queue = deque(maxlen=W)
     current_runlen = 0
     step_within_task = 0
@@ -745,7 +745,7 @@ for task in range(10, 10+args.runs):
             else:
                 inputs = x.view(x.size(0), -1).to(device)
             labels = y.to(device)
-            
+
             optimizer.zero_grad()
             out = model(inputs)
             preds = out.argmax(dim=1)
@@ -768,7 +768,7 @@ for task in range(10, 10+args.runs):
                     if p.requires_grad and p.ndim >= 2:
                         reg += (power_iteration(p, 1).pow(args.spectral_k) - 1.0).pow(2)
                 reg *= args.spectral_lambda
-            
+
             loss = base + reg
             params = [p for p in model.parameters() if p.requires_grad]
             old = [p.data.clone() for p in params]
@@ -818,7 +818,6 @@ for task in range(10, 10+args.runs):
                 if collapse_step_within_task is None and current_runlen >= K:
                     collapse_step_within_task = step_within_task
 
-
             # Sharpness Aware Minimization
             if args.sam:
                 loss.backward(create_graph=True)
@@ -836,7 +835,7 @@ for task in range(10, 10+args.runs):
 
                 for p, e in zip(params, epsilons):
                     p.data.sub_(e)
-                
+
                 optimizer.step()
             else:
                 loss.backward()
