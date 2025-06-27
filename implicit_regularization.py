@@ -12,11 +12,12 @@ from torch.utils.data import Subset
 import argparse
 import wandb
 import matplotlib.pyplot as plt
-
+import math
 from collections import deque
 
-W = 10  # Window size for sharpness tracking
+W = 20  # Window size for sharpness tracking
 K = 20
+TRACE_INTERVAL = 200
 
 parser = argparse.ArgumentParser()
 parser.add_argument(
@@ -72,6 +73,17 @@ parser.add_argument("--alpha", type=float, default=0.5)
 parser.add_argument("--l2_lambda", type=float, default=0.0)
 parser.add_argument("--spectral_lambda", type=float, default=0.0)
 parser.add_argument("--spectral_k", type=int, default=2)
+parser.add_argument("--lr", type=float, default=0.001)
+parser.add_argument("--beta1", type=float, default=0.9)
+parser.add_argument("--beta2", type=float, default=0.999)
+parser.add_argument(
+    "--beta_schedule", action="store_true", help="Use beta schedule for Adam optimizer"
+)
+parser.add_argument(
+    "--reset_optimizer",
+    action="store_true",
+    help="Reset optimizer state at the start of each run",
+)
 parser.add_argument(
     "--reg",
     type=str,
@@ -80,6 +92,7 @@ parser.add_argument(
 )
 parser.add_argument("--wass_lambda", type=float, default=0.0)
 parser.add_argument("--exp_name", type=str, default="")
+parser.add_argument("--optimizer", type=str, default="adam", choices=["adam", "sgd"])
 parser.add_argument(
     "--initialization",
     type=str,
@@ -99,13 +112,44 @@ parser.add_argument(
     help="Standard deviation (gamma) of Gaussian noise for shrink-and-perturb",
 )
 parser.add_argument(
-    "--step_size_schedule",
+    "--sam",
+    action="store_true",
+    help="Use Sharpness-Aware Minimization (SAM) for training",
+)
+parser.add_argument(
+    "--sam_rho",
+    type=float,
+    default=0.025,
+    help="Radius for SAM perturbation",
+)
+parser.add_argument(
+    "--lr_schedule",
     type=str,
     default="constant",
-    choices=["constant", "linear", "exponential", "polynomial", "cosine"],
+    choices=["constant", "step", "linear", "exponential", "polynomial", "cosine"],
+    help="Type of learning‐rate schedule",
+)
+parser.add_argument(
+    "--final_lr",
+    type=float,
+    default=0.0,
+    help="Final learning rate for linear schedule (default: 0.0)",
+)
+parser.add_argument(
+    "--step_size",
+    type=int,
+    default=10,
+    help="(for step schedule) number of epochs between drops",
+)
+parser.add_argument(
+    "--gamma", type=float, default=0.1, help="(for step & exponential) decay factor"
+)
+parser.add_argument(
+    "--power", type=float, default=1.0, help="(for polynomial) power degree"
 )
 args = parser.parse_args()
 
+rho = args.sam_rho
 device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
 
 map = {
@@ -115,6 +159,8 @@ map = {
     "identity": "linear",
     "crelu": "relu",
     "adalin": "leaky_relu",
+    "softplus": "relu",
+    "swish": "relu",
 }
 
 
@@ -165,6 +211,49 @@ def randomize_targets(dataset, p):
         else:
             dataset.targets = targets_list
         return dataset
+
+
+def preconditioned_sharpness(loss, params, nu, epsilon=1e-8, iters=20):
+    """
+    Estimate the top eigenvalue of P^{-1} H, where
+      P = diag(sqrt(nu)) + epsilon*I.
+    Uses power iteration with Hessian-vector products.
+
+    Args:
+      loss   - a scalar torch.Tensor (the loss at the current point)
+      params - list of model parameters (with requires_grad=True)
+      nu     - list of second-moment accumulators matching params
+      epsilon- small float for numerical stability
+      iters  - number of power-iteration steps
+
+    Returns:
+      approx top eigenvalue (float)
+    """
+    nu_flat = torch.cat([n.detach().view(-1) for n in nu])
+    P_inv_diag = 1.0 / (torch.sqrt(nu_flat) + epsilon)
+    dim = P_inv_diag.numel()
+
+    v = torch.randn(dim, device=loss.device)
+    v /= v.norm()
+
+    for _ in range(iters):
+        u = P_inv_diag * v
+        grads = torch.autograd.grad(loss, params, create_graph=True)
+        grad_flat = torch.cat([g.contiguous().view(-1) for g in grads])
+        Hu = torch.autograd.grad(grad_flat.dot(u), params, retain_graph=True)
+        Hu_flat = torch.cat([h.contiguous().view(-1) for h in Hu]).detach()
+
+        w = P_inv_diag * Hu_flat
+        v = w / (w.norm() + 1e-12)
+
+    u = P_inv_diag * v
+    grads = torch.autograd.grad(loss, params, create_graph=True)
+    grad_flat = torch.cat([g.contiguous().view(-1) for g in grads])
+    Hu = torch.autograd.grad(grad_flat.dot(u), params, retain_graph=False)
+    Hu_flat = torch.cat([h.contiguous().view(-1) for h in Hu]).detach()
+    w = P_inv_diag * Hu_flat
+
+    return v.dot(w).item()
 
 
 def empirical_fischer_rank(model, dataset, device, thresh=0.99, max_m=100):
@@ -241,6 +330,18 @@ def power_iteration(W, iters=1):
     return (W @ v).norm()
 
 
+def hessian_trace(loss, params, n_samples=1):
+    trace_est = 0.0
+    for _ in range(n_samples):
+        grads = torch.autograd.grad(loss, params, create_graph=True)
+        flat_grad = torch.cat([g.contiguous().view(-1) for g in grads])
+        v = torch.randn(flat_grad.size(), device=flat_grad.device)
+        Hv = torch.autograd.grad(flat_grad.dot(v), params, retain_graph=True)
+        Hv_flat = torch.cat([h.contiguous().view(-1) for h in Hv])
+        trace_est += (flat_grad * Hv_flat).sum().item()
+    return trace_est / n_samples
+
+
 class MLP(nn.Module):
     def __init__(self, i, h, o):
         super().__init__()
@@ -259,7 +360,7 @@ class MLP(nn.Module):
                     nn.init.kaiming_uniform_(
                         m.weight,
                         a=args.alpha if args.activation == "adalin" else 0,
-                        nonlinearity=map[args.activation],
+                        nonlinearity=(map[args.activation]),
                     )
                 elif args.initialization == "xavier":
                     nn.init.xavier_uniform_(m.weight)
@@ -323,24 +424,6 @@ class MLP(nn.Module):
             x = self.fc1(x)
             x = self.fc2(x)
             x = self.fc3(x)
-        return self.fc4(x)
-
-
-class LayerNormMLP(nn.Module):
-    def __init__(self, i, h, o):
-        super().__init__()
-        self.fc1 = nn.Linear(i, h)
-        self.fc2 = nn.Linear(h, h)
-        self.fc3 = nn.Linear(h, h)
-        self.fc4 = nn.Linear(h, o)
-        self.ln1 = nn.LayerNorm(h)
-        self.ln2 = nn.LayerNorm(h)
-        self.ln3 = nn.LayerNorm(h)
-
-    def forward(self, x):
-        x = F.relu(self.ln1(self.fc1(x)))
-        x = F.relu(self.ln2(self.fc2(x)))
-        x = F.relu(self.ln3(self.fc3(x)))
         return self.fc4(x)
 
 
@@ -420,21 +503,6 @@ class BatchNormMLP(nn.Module):
         return self.fc5(x)
 
 
-class LeakyLayerNormMLP(nn.Module):
-    def __init__(self, i, h, o):
-        super().__init__()
-        self.fc1 = nn.Linear(i, h)
-        self.fc2 = nn.Linear(h, h)
-        self.fc3 = nn.Linear(h, o)
-        self.ln1 = nn.LayerNorm(h)
-        self.ln2 = nn.LayerNorm(h)
-
-    def forward(self, x):
-        x = F.leaky_relu(self.ln1(self.fc1(x)))
-        x = F.leaky_relu(self.ln2(self.fc2(x)))
-        return self.fc3(x)
-
-
 class CNN(nn.Module):
     def __init__(self, in_channels):
         super().__init__()
@@ -508,7 +576,7 @@ elif args.dataset == "CIFAR10":
         ]
     )
     full = CIFAR10(root="../data", train=True, download=True, transform=tf)
-    perm = torch.randperm(len(full))[:38400]
+    perm = torch.randperm(len(full))[:20400]
     train_dataset = Subset(full, perm)
     test_dataset = CIFAR10(root="../data", train=False, download=True, transform=tf)
     in_ch = 3
@@ -636,8 +704,12 @@ else:
 
 criterion = nn.CrossEntropyLoss()
 wd = args.l2_lambda if args.reg == "l2" else 0.0
-optimizer = optim.Adam(model.parameters(), lr=1e-3, weight_decay=wd)
-# optimizer = torch.optim.SGD(model.parameters(), lr=1e-2, momentum=0.9, weight_decay=wd)
+if args.optimizer == "adam":
+    optimizer = optim.Adam(
+        model.parameters(), lr=args.lr, weight_decay=wd, betas=(0.9, args.beta2)
+    )
+elif args.optimizer == "sgd":
+    optimizer = torch.optim.SGD(model.parameters(), lr=args.lr, weight_decay=wd)
 
 #
 run = wandb.init(
@@ -670,6 +742,13 @@ results = {
     }
 }
 for task in range(10, 10 + args.runs):
+    # if args.lr_schedule:
+    #     for g in optimizer.param_groups:
+    #         g['lr'] = args.lr * (task - 9)
+    if args.optimizer == "adam" and args.reset_optimizer:
+        optimizer.state.clear()
+        # optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=wd, betas=(args.beta1, args.beta2))
+
     sharp_queue = deque(maxlen=W)
     current_runlen = 0
     step_within_task = 0
@@ -699,18 +778,55 @@ for task in range(10, 10 + args.runs):
         )
 
     total_updates = 0
+    if total_updates % args.log_interval == 0:
+        hessian_rank = empirical_fischer_rank(model, train_dataset, device)
 
     model.train()
+
+    # lr schedulers
+    if args.lr_schedule == "linear":
+        total_steps = args.epochs * math.ceil(len(train_dataset) / args.batch_size)
+        initial_lr = args.lr * (task - 9)
+        final_lr = args.final_lr * (task - 9)
+        decay_range = initial_lr - final_lr
+        print(initial_lr, final_lr)
+        scheduler = optim.lr_scheduler.LambdaLR(
+            optimizer,
+            lr_lambda=lambda step: max(
+                0.0,
+                (initial_lr - (decay_range * step / total_steps)) / initial_lr,
+            ),
+        )
+    elif args.lr_schedule == "step":
+        scheduler = optim.lr_scheduler.StepLR(
+            optimizer, step_size=args.step_size, gamma=args.gamma
+        )
+    elif args.lr_schedule == "exponential":
+        scheduler = optim.lr_scheduler.ExponentialLR(optimizer, gamma=args.gamma)
+    elif args.lr_schedule == "polynomial":
+        total_steps = args.epochs * math.ceil(len(train_dataset) / args.batch_size)
+        scheduler = optim.lr_scheduler.LambdaLR(
+            optimizer,
+            lr_lambda=lambda step: (1 - step / total_steps) ** args.power,
+        )
+    elif args.lr_schedule == "cosine":
+        scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
+            optimizer, T_0=args.epochs
+        )
+    else:
+        scheduler = None
+
     sum_up = 0.0
     this_task_acc = 0.0
-    for _ in range(args.epochs):
-        hessian_rank = empirical_fischer_rank(model, train_dataset, device)
+    this_normalized_sharp = 0.0
+    for epoch in range(args.epochs):
         for x, y in loader:
             if args.model in ["CNN", "BatchNormCNN"]:
                 inputs = x.to(device)
             else:
                 inputs = x.view(x.size(0), -1).to(device)
             labels = y.to(device)
+
             optimizer.zero_grad()
             out = model(inputs)
             preds = out.argmax(dim=1)
@@ -733,13 +849,31 @@ for task in range(10, 10 + args.runs):
                     if p.requires_grad and p.ndim >= 2:
                         reg += (power_iteration(p, 1).pow(args.spectral_k) - 1.0).pow(2)
                 reg *= args.spectral_lambda
+
             loss = base + reg
             params = [p for p in model.parameters() if p.requires_grad]
             old = [p.data.clone() for p in params]
 
+            nus = [
+                optimizer.state[p]["exp_avg_sq"]
+                for p in optimizer.param_groups[0]["params"]
+                if "exp_avg_sq" in optimizer.state[p]
+            ]
+
+            # if total_updates % TRACE_INTERVAL == 0:
+            #     trace_val = hessian_trace(loss, params, n_samples=10)
+
             if total_updates % args.log_interval == 0:
+                # nus = [
+                # optimizer.state[p]["exp_avg_sq"]
+                # for p in optimizer.param_groups[0]["params"]
+                # if "exp_avg_sq" in optimizer.state[p]
+                # ]
+                # precond = ( preconditioned_sharpness(loss, params, nus, epsilon=optimizer.param_groups[0].get("eps",1e-8))
+                #             if len(nus) else None )
                 eigs = estimate_hessian_topk(model, loss, params, k=5)
                 sharpness = eigs[0]
+                ratio = eigs[0] / (eigs[4] + 1e-12)
 
                 v_squares = []
                 for group in optimizer.param_groups:
@@ -756,7 +890,11 @@ for task in range(10, 10 + args.runs):
                 else:
                     alpha_agg = optimizer.param_groups[0]["lr"]
 
-                norm_sharpness = sharpness * alpha_agg
+                if args.optimizer == "adam":
+                    norm_sharpness = sharpness * alpha_agg
+                else:
+                    norm_sharpness = sharpness
+                this_normalized_sharp += norm_sharpness
 
                 sharp_queue.append(norm_sharpness)
 
@@ -774,8 +912,43 @@ for task in range(10, 10 + args.runs):
                 if collapse_step_within_task is None and current_runlen >= K:
                     collapse_step_within_task = step_within_task
 
-            loss.backward()
-            optimizer.step()
+            # Sharpness Aware Minimization
+            if args.sam:
+                loss.backward(create_graph=True)
+                grads = torch.autograd.grad(loss, params, create_graph=True)
+                grad_flat = torch.cat([g.view(-1) for g in grads])
+                grad_norm = grad_flat.norm() + 1e-12
+                epsilons = [(rho / grad_norm) * g for g in grads]
+
+                for p, e in zip(params, epsilons):
+                    p.data.add_(e)
+                out_adv = model(inputs)
+                loss_adv = criterion(out_adv, labels) + reg
+                optimizer.zero_grad()
+                loss_adv.backward()
+
+                for p, e in zip(params, epsilons):
+                    p.data.sub_(e)
+
+                optimizer.step()
+            else:
+                loss.backward()
+                optimizer.step()
+
+                # betas scheduling
+                if args.optimizer == "adam":
+                    end = 2 * args.epochs
+                    if epoch < end:
+                        beta1 = args.beta1 + (0.99 - args.beta1) * (epoch / (end))
+                        beta2 = args.beta2 + (0.75 - args.beta2) * (epoch / (end))
+                    else:
+                        beta1 = 0.99
+                        beta2 = 0.75
+                    if args.beta_schedule:
+                        optimizer.param_groups[0]["betas"] = (beta1, beta2)
+                if args.lr_schedule == "linear":
+                    scheduler.step()
+
             # shrink perturb
             if args.reg == "shrink_perturb":
                 for p in model.parameters():
@@ -800,12 +973,19 @@ for task in range(10, 10 + args.runs):
                     "weight_norm": wn,
                     # "average_use_val": avg_use_val,
                     "hessian_rank": hessian_rank,
+                    # "trace_val": (
+                    #     trace_val if total_updates % TRACE_INTERVAL == 0 else None
+                    # ),
                     "sharpness": sharpness,
                     "norm_sharpness": norm_sharpness,
                     "runlen": current_runlen,  # how many consecutive steps ≥ 2, within this task
                     "frac_above": frac_above,  # fraction of last W steps ≥ 2, within this task
                     "lam_mean": lam_mean,
                     "lam_std": lam_std,
+                    "lam_max / lam_5": ratio,
+                    "lr": optimizer.param_groups[0]["lr"],
+                    # "beta2": optimizer.param_groups[0]["betas"][1],
+                    # "preconditioned_sharp": precond,
                     # **use_vals,
                     # **hess_avgs,
                 }
@@ -813,6 +993,8 @@ for task in range(10, 10 + args.runs):
                 #     h = activations["l1"]
                 #     use1 = compute_use_for_activation(h); log["use_l1"]=use1
                 run.log(log)
+        if scheduler is not None:
+            scheduler.step()
 
     model.eval()
     eval_loader = data.DataLoader(
@@ -850,6 +1032,7 @@ for task in range(10, 10 + args.runs):
         {
             "J": J,
             "param_norm": pn,
+            "avg_norm_sharp": this_normalized_sharp / (args.epochs * len(loader)),
             "average_update_norm": aun,
             "effective_rank": effective_rank,
             "task_acc": this_task_acc / (args.epochs * len(loader)),
