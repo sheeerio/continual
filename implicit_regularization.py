@@ -93,6 +93,44 @@ parser.add_argument(
 parser.add_argument("--wass_lambda", type=float, default=0.0)
 parser.add_argument("--exp_name", type=str, default="")
 parser.add_argument("--optimizer", type=str, default="adam", choices=["adam", "sgd"])
+# Wsd scheduler hyperparameters
+parser.add_argument(
+    "--wsd_warmup_tokens",
+    type=int,
+    default=0,
+    help="Number of tokens over which to linearly warm up",
+)
+parser.add_argument(
+    "--wsd_decay_proportion",
+    type=float,
+    default=0.15,
+    help="Fraction of total tokens used for the final decay phase (default: 0.1)",
+)
+
+# Power scheduler hyperparameters
+parser.add_argument(
+    "--power_max_lr",
+    type=float,
+    default=1e-2,
+)
+parser.add_argument(
+    "--power_exponent",
+    type=float,
+    default=0.5,
+    help="Decay exponent p for Power scheduler (see Eq (7))",
+)
+parser.add_argument(
+    "--power_warmup_tokens",
+    type=int,
+    default=1_000,
+    help="Tokens over which to warm up before applying pure Power decay (default: 1 B)",
+)
+parser.add_argument(
+    "--power_decay_proportion",
+    type=float,
+    default=0.0,
+    help="Fraction of total tokens for final exponential decay stage",
+)
 parser.add_argument(
     "--initialization",
     type=str,
@@ -126,7 +164,16 @@ parser.add_argument(
     "--lr_schedule",
     type=str,
     default="constant",
-    choices=["constant", "step", "linear", "exponential", "polynomial", "cosine"],
+    choices=[
+        "constant",
+        "step",
+        "linear",
+        "exponential",
+        "polynomial",
+        "cosine",
+        "wsd",
+        "power",
+    ],
     help="Type of learning‐rate schedule",
 )
 parser.add_argument(
@@ -162,6 +209,38 @@ map = {
     "softplus": "relu",
     "swish": "relu",
 }
+
+
+def wsd_lambda(step):
+    n = step * args.batch_size
+    Nw = args.wsd_warmup_tokens
+    Nd = int(total_tokens * args.wsd_decay_proportion)
+    if n < Nw:
+        return n / Nw
+    elif n <= total_tokens - Nd:
+        return 1.0
+    else:
+        return max(0.0, (total_tokens - n) / Nd)
+
+
+def power_lambda(step):
+    power_alpha = args.lr * (args.power_warmup_tokens ** (args.power_exponent))
+    n = step * args.batch_size
+    Nw = args.power_warmup_tokens
+    Nd = int(total_tokens * args.power_decay_proportion)
+    eta_pw = lambda t: min(
+        power_alpha * (t ** (-args.power_exponent)),
+        args.lr,
+    )
+    if n < Nw:
+        # warmup to η_power(Nw)
+        return (n / Nw) * (eta_pw(Nw) / args.lr)
+    else:
+        # middle: pure power‐law
+        return eta_pw(n) / args.lr
+    # else:
+    #     # final decay of the *value* at n = N – Nd
+    #     return ((total_tokens - n) / Nd) * (eta_pw(total_tokens - Nd) / args.lr)
 
 
 def set_seed(s):
@@ -784,6 +863,11 @@ for task in range(10, 10 + args.runs):
     model.train()
 
     # lr schedulers
+
+    # for wsd and power lr schedulers
+    total_steps = args.epochs * math.ceil(len(train_dataset) / args.batch_size)
+    total_tokens = total_steps * args.batch_size
+
     if args.lr_schedule == "linear":
         total_steps = args.epochs * math.ceil(len(train_dataset) / args.batch_size)
         initial_lr = args.lr * (task - 9)
@@ -813,6 +897,10 @@ for task in range(10, 10 + args.runs):
         scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
             optimizer, T_0=args.epochs
         )
+    elif args.lr_schedule == "wsd":
+        scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=wsd_lambda)
+    elif args.lr_schedule == "power":
+        scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=power_lambda)
     else:
         scheduler = None
 
@@ -946,7 +1034,7 @@ for task in range(10, 10 + args.runs):
                         beta2 = 0.75
                     if args.beta_schedule:
                         optimizer.param_groups[0]["betas"] = (beta1, beta2)
-                if args.lr_schedule == "linear":
+                if args.lr_schedule:
                     scheduler.step()
 
             # shrink perturb
