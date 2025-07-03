@@ -783,11 +783,10 @@ else:
 criterion = nn.CrossEntropyLoss()
 wd = args.l2_lambda if args.reg == "l2" else 0.0
 if args.optimizer == "adam":
-    optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=wd, betas=(args.beta1, args.beta2))
+    optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=wd, betas=(0.9, args.beta2))
 elif args.optimizer == "sgd": 
     optimizer = torch.optim.SGD(model.parameters(), lr=args.lr, weight_decay=wd)
-if args.reg == "l2":
-    optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.l2_lambda, betas=(args.beta1, args.beta2))
+
 #
 run = wandb.init(
     project=f"random_label_{args.dataset}",
@@ -1035,7 +1034,7 @@ for task in range(10, 10+args.runs):
                         beta2 = 0.75
                     if args.beta_schedule:
                         optimizer.param_groups[0]['betas'] = (beta1, beta2)
-                if args.lr_schedule:
+                if args.lr_schedule != "constant":
                     scheduler.step()
             
 
