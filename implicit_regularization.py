@@ -80,6 +80,9 @@ parser.add_argument(
     "--beta_schedule", action="store_true", help="Use beta schedule for Adam optimizer"
 )
 parser.add_argument(
+    "--reset_model", action="store_true", help="Reset model at the start of each run"
+)
+parser.add_argument(
     "--reset_optimizer",
     action="store_true",
     help="Reset optimizer state at the start of each run",
@@ -144,6 +147,30 @@ parser.add_argument(
     choices=["kaiming", "xavier", "normal", "uniform"],
 )
 parser.add_argument(
+    "--normal_mean",
+    type=float,
+    default=0.0,
+    help="Mean for normal initialization (default: 0.0)",
+)
+parser.add_argument(
+    "--normal_std",
+    type=float,
+    default=1.0,
+    help="Standard deviation for normal initialization (default: 1.0)",
+)
+parser.add_argument(
+    "--uniform_a",
+    type=float,
+    default=-0.1,
+    help="Lower bound for uniform initialization (default: -0.1)",
+)
+parser.add_argument(
+    "--uniform_b",
+    type=float,
+    default=0.1,
+    help="Upper bound for uniform initialization (default: 0.1)",
+)
+parser.add_argument(
     "--sp_weight_decay",
     type=float,
     default=0.0,
@@ -205,6 +232,8 @@ args = parser.parse_args()
 
 rho = args.sam_rho
 device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
+noise_power_full = 0.0
+noise_power_mb = 0.0
 
 map = {
     "relu": "relu",
@@ -216,6 +245,46 @@ map = {
     "softplus": "relu",
     "swish": "relu",
 }
+
+import torch, functools, operator
+from torch.func import functional_call, vmap, grad, hessian  # PyTorch ≥2.0
+
+
+def flatten_params(model):
+    flat, shapes = [], []
+    for p in model.parameters():
+        shapes.append(p.shape)
+        flat.append(p.reshape(-1))
+    return torch.cat(flat), shapes
+
+
+def unflatten_params(flat, shapes):
+    params, idx = [], 0
+    for sh in shapes:
+        n = functools.reduce(operator.mul, sh)
+        params.append(flat[idx : idx + n].reshape(sh))
+        idx += n
+    return params
+
+
+def exact_top_eigenvalue(model, x, y, criterion):
+    flat0, shapes = flatten_params(model)
+    flat0.requires_grad_(True)
+
+    # rebuild model with functional_call
+    def f(flat_params, inputs, targets):
+        new_params = unflatten_params(flat_params, shapes)
+        state_dict = dict(zip([k for k, _ in model.named_parameters()], new_params))
+        logits = functional_call(model, state_dict, (inputs,))
+        return criterion(logits, targets)
+
+    # full Hessian
+    H = hessian(lambda p: f(p, x, y), flat0)
+
+    # largest eigen-value (real part)
+    eigenvals = torch.linalg.eigvals(H)
+    lam_max = eigenvals.real.max().item()
+    return lam_max
 
 
 def skew_lambda(step):
@@ -367,7 +436,7 @@ def empirical_fischer_rank(model, dataset, device, thresh=0.99, max_m=100):
         y = y.to(device)
         model.zero_grad()
         output = model(x)
-        loss = nn.CrossEntropyLoss()(output, y)
+        loss = nn.CrossEntropyLoss(reduction="mean")(output, y)
         loss.backward()
         g = torch.cat([p.grad.view(-1) for p in params])
         grads.append(g)
@@ -460,9 +529,11 @@ class MLP(nn.Module):
                 elif args.initialization == "xavier":
                     nn.init.xavier_uniform_(m.weight)
                 elif args.initialization == "normal":
-                    nn.init.normal_(m.weight, mean=0.0, std=1.0)
+                    nn.init.normal_(
+                        m.weight, mean=args.normal_mean, std=args.normal_std
+                    )
                 elif args.initialization == "uniform":
-                    nn.init.uniform_(m.weight, a=-0.1, b=0.1)
+                    nn.init.uniform_(m.weight, a=args.uniform_a, b=args.uniform_b)
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
 
@@ -797,7 +868,7 @@ if args.model in [
 else:
     model.fc1.register_forward_hook(save_activations("l1"))
 
-criterion = nn.CrossEntropyLoss()
+criterion = nn.CrossEntropyLoss(reduction="mean")
 wd = args.l2_lambda if args.reg == "l2" else 0.0
 if args.optimizer == "adam":
     optimizer = optim.Adam(
@@ -826,6 +897,10 @@ run = wandb.init(
         "wass_lambda": args.wass_lambda,
     },
 )
+wandb.define_metric("gradient_noise", hidden=False)
+wandb.define_metric("gradient_noise_mb", hidden=False)
+wandb.define_metric("true_grad_norm_sq", hidden=False)
+wandb.define_metric("task_lam_std", hidden=False)
 
 results = {
     args.activation: {
@@ -837,14 +912,20 @@ results = {
     }
 }
 for task in range(10, 10 + args.runs):
-    # if args.lr_schedule:
-    #     for g in optimizer.param_groups:
-    #         g['lr'] = args.lr * (task - 9)
+    if args.reset_model:
+        model = MLP(input_size, hidden, 10).to(device)
+        if args.optimizer == "adam":
+            optimizer = optim.Adam(
+                model.parameters(),
+                lr=args.lr,
+                weight_decay=wd,
+                betas=(args.beta1, args.beta2),
+            )
     if args.optimizer == "adam" and args.reset_optimizer:
         optimizer.state.clear()
-        # optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=wd, betas=(args.beta1, args.beta2))
 
     sharp_queue = deque(maxlen=W)
+    avg_sharp_queue = deque(maxlen=args.epochs)
     current_runlen = 0
     step_within_task = 0
     collapse_step_within_task = None
@@ -1001,11 +1082,16 @@ for task in range(10, 10 + args.runs):
                 this_normalized_sharp += norm_sharpness
 
                 sharp_queue.append(norm_sharpness)
+                avg_sharp_queue.append(norm_sharpness)
 
                 lam_mean = sum(sharp_queue) / len(sharp_queue)
+                avg_lam_mean = sum(avg_sharp_queue) / len(avg_sharp_queue)
                 lam_std = (
                     sum((x - lam_mean) ** 2 for x in sharp_queue) / len(sharp_queue)
                 ) ** 0.5
+                avg_lam_std = sum(
+                    (x - avg_lam_mean) ** 2 for x in avg_sharp_queue
+                ) / len(avg_sharp_queue)
                 frac_above = sum(1 for x in sharp_queue if x > 2.0) / len(sharp_queue)
 
                 if norm_sharpness > 2.0:
@@ -1037,6 +1123,13 @@ for task in range(10, 10 + args.runs):
                 optimizer.step()
             else:
                 loss.backward()
+                if total_updates % args.log_interval == 0:
+                    params = [p for p in model.parameters() if p.requires_grad]
+                    grad_flat = torch.cat([p.grad.view(-1) for p in params])
+                    true_grad_norm_sq = (grad_flat.norm() ** 2).item()
+                    var_grad = grad_flat.var(unbiased=False).item()
+                    noise_power_full = (args.lr**2) * var_grad
+                    noise_power_mb = (args.lr**2) * var_grad / args.batch_size
                 optimizer.step()
 
                 # betas scheduling
@@ -1086,8 +1179,12 @@ for task in range(10, 10 + args.runs):
                     "frac_above": frac_above,  # fraction of last W steps ≥ 2, within this task
                     "lam_mean": lam_mean,
                     "lam_std": lam_std,
-                    "lam_max / lam_5": ratio,
+                    "task_lam_std": avg_lam_std,
+                    # "lam_max / lam_5": ratio,
                     "lr": optimizer.param_groups[0]["lr"],
+                    "true_grad_norm_sq": var_grad,
+                    "gradient_noise": noise_power_full,
+                    "gradient_noise_mb": noise_power_mb,
                     # "beta2": optimizer.param_groups[0]["betas"][1],
                     # "preconditioned_sharp": precond,
                     # **use_vals,
