@@ -14,7 +14,6 @@ import wandb
 import matplotlib.pyplot as plt
 import math
 from collections import deque
-
 W = 20  # Window size for sharpness tracking
 K = 20
 TRACE_INTERVAL = 200
@@ -76,16 +75,14 @@ parser.add_argument("--spectral_k", type=int, default=2)
 parser.add_argument("--lr", type=float, default=0.001)
 parser.add_argument("--beta1", type=float, default=0.9)
 parser.add_argument("--beta2", type=float, default=0.999)
+parser.add_argument("--beta_schedule", action="store_true", help="Use beta schedule for Adam optimizer")
+parser.add_argument("--reset_model", action="store_true", help="Reset model at the start of each run")
+parser.add_argument("--reset_optimizer", action="store_true", help="Reset optimizer state at the start of each run")
 parser.add_argument(
-    "--beta_schedule", action="store_true", help="Use beta schedule for Adam optimizer"
-)
-parser.add_argument(
-    "--reset_model", action="store_true", help="Reset model at the start of each run"
-)
-parser.add_argument(
-    "--reset_optimizer",
-    action="store_true",
-    help="Reset optimizer state at the start of each run",
+    "--ns",
+    type=float,
+    default=1.0,
+    help="Fraction of targets to randomize (default: 1.0, full randomization)",
 )
 parser.add_argument(
     "--reg",
@@ -138,7 +135,7 @@ parser.add_argument(
     "--skew_peak_frac",
     type=float,
     default=0.4,
-    help="Fraction of total steps at which LR peaks (for skew schedule)",
+    help="Fraction of total steps at which LR peaks (for skew schedule)"
 )
 parser.add_argument(
     "--initialization",
@@ -197,17 +194,7 @@ parser.add_argument(
     "--lr_schedule",
     type=str,
     default="constant",
-    choices=[
-        "constant",
-        "step",
-        "linear",
-        "exponential",
-        "polynomial",
-        "cosine",
-        "wsd",
-        "power",
-        "skew",
-    ],
+    choices=["constant", "step", "linear", "exponential", "polynomial", "cosine", "wsd", "power", "skew"],
     help="Type of learning‐rate schedule",
 )
 parser.add_argument(
@@ -220,20 +207,26 @@ parser.add_argument(
     "--step_size",
     type=int,
     default=10,
-    help="(for step schedule) number of epochs between drops",
+    help="(for step schedule) number of epochs between drops"
 )
 parser.add_argument(
-    "--gamma", type=float, default=0.1, help="(for step & exponential) decay factor"
+    "--gamma",
+    type=float,
+    default=0.1,
+    help="(for step & exponential) decay factor"
 )
 parser.add_argument(
-    "--power", type=float, default=1.0, help="(for polynomial) power degree"
+    "--power",
+    type=float,
+    default=1.0,
+    help="(for polynomial) power degree"
 )
 args = parser.parse_args()
 
 rho = args.sam_rho
 device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
-noise_power_full = 0.0
-noise_power_mb = 0.0
+noise_power_full   = 0.0
+noise_power_mb     = 0.0
 
 map = {
     "relu": "relu",
@@ -246,55 +239,13 @@ map = {
     "swish": "relu",
 }
 
-import torch, functools, operator
-from torch.func import functional_call, vmap, grad, hessian  # PyTorch ≥2.0
-
-
-def flatten_params(model):
-    flat, shapes = [], []
-    for p in model.parameters():
-        shapes.append(p.shape)
-        flat.append(p.reshape(-1))
-    return torch.cat(flat), shapes
-
-
-def unflatten_params(flat, shapes):
-    params, idx = [], 0
-    for sh in shapes:
-        n = functools.reduce(operator.mul, sh)
-        params.append(flat[idx : idx + n].reshape(sh))
-        idx += n
-    return params
-
-
-def exact_top_eigenvalue(model, x, y, criterion):
-    flat0, shapes = flatten_params(model)
-    flat0.requires_grad_(True)
-
-    # rebuild model with functional_call
-    def f(flat_params, inputs, targets):
-        new_params = unflatten_params(flat_params, shapes)
-        state_dict = dict(zip([k for k, _ in model.named_parameters()], new_params))
-        logits = functional_call(model, state_dict, (inputs,))
-        return criterion(logits, targets)
-
-    # full Hessian
-    H = hessian(lambda p: f(p, x, y), flat0)
-
-    # largest eigen-value (real part)
-    eigenvals = torch.linalg.eigvals(H)
-    lam_max = eigenvals.real.max().item()
-    return lam_max
-
-
 def skew_lambda(step):
-    t = step / total_steps
+    t = step / total_steps  
     p = args.skew_peak_frac
     if t < p:
-        return t / p
+        return t / p                          
     else:
-        return max((1 - t) / (1 - p), 0.0)
-
+        return max((1 - t) / (1 - p), 0.0)  
 
 def wsd_lambda(step):
     n = step * args.batch_size
@@ -306,7 +257,6 @@ def wsd_lambda(step):
         return 1.0
     else:
         return max(0.0, (total_tokens - n) / Nd)
-
 
 def power_lambda(step):
     power_alpha = args.lr * (args.power_warmup_tokens ** (args.power_exponent))
@@ -376,7 +326,6 @@ def randomize_targets(dataset, p):
             dataset.targets = targets_list
         return dataset
 
-
 def preconditioned_sharpness(loss, params, nu, epsilon=1e-8, iters=20):
     """
     Estimate the top eigenvalue of P^{-1} H, where
@@ -419,7 +368,6 @@ def preconditioned_sharpness(loss, params, nu, epsilon=1e-8, iters=20):
 
     return v.dot(w).item()
 
-
 def empirical_fischer_rank(model, dataset, device, thresh=0.99, max_m=100):
     loader = data.DataLoader(dataset, batch_size=1, shuffle=False)
     model.eval()
@@ -436,7 +384,7 @@ def empirical_fischer_rank(model, dataset, device, thresh=0.99, max_m=100):
         y = y.to(device)
         model.zero_grad()
         output = model(x)
-        loss = nn.CrossEntropyLoss(reduction="mean")(output, y)
+        loss = nn.CrossEntropyLoss(reduction='mean')(output, y)
         loss.backward()
         g = torch.cat([p.grad.view(-1) for p in params])
         grads.append(g)
@@ -446,7 +394,8 @@ def empirical_fischer_rank(model, dataset, device, thresh=0.99, max_m=100):
     sig = torch.linalg.svdvals(M)
     cumsum = torch.cumsum(sig, dim=0)
     total = cumsum[-1]
-    j = (cumsum / total >= thresh).nonzero()[0].item() + 1
+    # dimension 0 error 
+    j = (cumsum / total >= thresh).nonzero()[0].item() + 1 if total !=0 else 0
     return j / float(m)
 
 
@@ -524,14 +473,14 @@ class MLP(nn.Module):
                     nn.init.kaiming_uniform_(
                         m.weight,
                         a=args.alpha if args.activation == "adalin" else 0,
-                        nonlinearity=(map[args.activation]),
+                        nonlinearity=(
+                            map[args.activation]
+                        ),
                     )
                 elif args.initialization == "xavier":
                     nn.init.xavier_uniform_(m.weight)
                 elif args.initialization == "normal":
-                    nn.init.normal_(
-                        m.weight, mean=args.normal_mean, std=args.normal_std
-                    )
+                    nn.init.normal_(m.weight, mean=args.normal_mean, std=args.normal_std)
                 elif args.initialization == "uniform":
                     nn.init.uniform_(m.weight, a=args.uniform_a, b=args.uniform_b)
                 if m.bias is not None:
@@ -591,7 +540,6 @@ class MLP(nn.Module):
             x = self.fc2(x)
             x = self.fc3(x)
         return self.fc4(x)
-
 
 class BatchNormMLP(nn.Module):
     def __init__(self, i, h, o):
@@ -668,7 +616,6 @@ class BatchNormMLP(nn.Module):
             x = self.fc4(x) * torch.sigmoid(self.bn4(self.fc4(x)))
         return self.fc5(x)
 
-
 class CNN(nn.Module):
     def __init__(self, in_channels):
         super().__init__()
@@ -688,7 +635,6 @@ class CNN(nn.Module):
         x = self.flatten(x)
         x = F.relu(self.fc1(x))
         return self.fc2(x)
-
 
 class BatchNormCNN(nn.Module):
     def __init__(self, in_channels):
@@ -871,10 +817,8 @@ else:
 criterion = nn.CrossEntropyLoss(reduction="mean")
 wd = args.l2_lambda if args.reg == "l2" else 0.0
 if args.optimizer == "adam":
-    optimizer = optim.Adam(
-        model.parameters(), lr=args.lr, weight_decay=wd, betas=(0.9, args.beta2)
-    )
-elif args.optimizer == "sgd":
+    optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=wd, betas=(0.9, args.beta2))
+elif args.optimizer == "sgd": 
     optimizer = torch.optim.SGD(model.parameters(), lr=args.lr, weight_decay=wd)
 
 #
@@ -897,10 +841,10 @@ run = wandb.init(
         "wass_lambda": args.wass_lambda,
     },
 )
-wandb.define_metric("gradient_noise", hidden=False)
-wandb.define_metric("gradient_noise_mb", hidden=False)
-wandb.define_metric("true_grad_norm_sq", hidden=False)
-wandb.define_metric("task_lam_std", hidden=False)
+wandb.define_metric("gradient_noise",   hidden=False)
+wandb.define_metric("gradient_noise_mb",hidden=False)
+wandb.define_metric("true_grad_norm_sq",hidden=False)
+wandb.define_metric("task_lam_std",     hidden=False)
 
 results = {
     args.activation: {
@@ -911,16 +855,12 @@ results = {
         "dormancy": [],
     }
 }
-for task in range(10, 10 + args.runs):
+# for task in range(10, 10+args.runs):
+for task in range(0, args.runs+1):
     if args.reset_model:
         model = MLP(input_size, hidden, 10).to(device)
         if args.optimizer == "adam":
-            optimizer = optim.Adam(
-                model.parameters(),
-                lr=args.lr,
-                weight_decay=wd,
-                betas=(args.beta1, args.beta2),
-            )
+            optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=wd, betas=(args.beta1, args.beta2))
     if args.optimizer == "adam" and args.reset_optimizer:
         optimizer.state.clear()
 
@@ -948,7 +888,12 @@ for task in range(10, 10 + args.runs):
             train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4
         )
     else:
-        train_dataset = randomize_targets(train_dataset, task / 10)
+        # -x-x-x-x smooth non-stationary experiment -x-x-x-x
+        train_dataset = randomize_targets(train_dataset, args.ns)
+        # if task == args.runs:
+        #     train_dataset = randomize_targets(train_dataset, 1.0)
+        # -x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x
+
         loader = data.DataLoader(
             train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4
         )
@@ -958,9 +903,9 @@ for task in range(10, 10 + args.runs):
         hessian_rank = empirical_fischer_rank(model, train_dataset, device)
 
     model.train()
-
+    
     # for skew, wsd, and power lr schedulers
-    total_steps = args.epochs * math.ceil(len(train_dataset) / args.batch_size)
+    total_steps  = args.epochs * math.ceil(len(train_dataset) / args.batch_size)
     total_tokens = total_steps * args.batch_size
 
     if args.lr_schedule == "linear":
@@ -981,7 +926,9 @@ for task in range(10, 10 + args.runs):
             optimizer, step_size=args.step_size, gamma=args.gamma
         )
     elif args.lr_schedule == "exponential":
-        scheduler = optim.lr_scheduler.ExponentialLR(optimizer, gamma=args.gamma)
+        scheduler = optim.lr_scheduler.ExponentialLR(
+            optimizer, gamma=args.gamma
+        )
     elif args.lr_schedule == "polynomial":
         total_steps = args.epochs * math.ceil(len(train_dataset) / args.batch_size)
         scheduler = optim.lr_scheduler.LambdaLR(
@@ -1011,7 +958,7 @@ for task in range(10, 10 + args.runs):
             else:
                 inputs = x.view(x.size(0), -1).to(device)
             labels = y.to(device)
-
+            
             optimizer.zero_grad()
             out = model(inputs)
             preds = out.argmax(dim=1)
@@ -1034,7 +981,7 @@ for task in range(10, 10 + args.runs):
                     if p.requires_grad and p.ndim >= 2:
                         reg += (power_iteration(p, 1).pow(args.spectral_k) - 1.0).pow(2)
                 reg *= args.spectral_lambda
-
+            
             loss = base + reg
             params = [p for p in model.parameters() if p.requires_grad]
             old = [p.data.clone() for p in params]
@@ -1054,7 +1001,7 @@ for task in range(10, 10 + args.runs):
                 # for p in optimizer.param_groups[0]["params"]
                 # if "exp_avg_sq" in optimizer.state[p]
                 # ]
-                # precond = ( preconditioned_sharpness(loss, params, nus, epsilon=optimizer.param_groups[0].get("eps",1e-8))
+                # precond = ( preconditioned_sharpness(loss, params, nus, epsilon=optimizer.param_groups[0].get("eps",1e-8)) 
                 #             if len(nus) else None )
                 eigs = estimate_hessian_topk(model, loss, params, k=5)
                 sharpness = eigs[0]
@@ -1088,10 +1035,11 @@ for task in range(10, 10 + args.runs):
                 avg_lam_mean = sum(avg_sharp_queue) / len(avg_sharp_queue)
                 lam_std = (
                     sum((x - lam_mean) ** 2 for x in sharp_queue) / len(sharp_queue)
-                ) ** 0.5
-                avg_lam_std = sum(
-                    (x - avg_lam_mean) ** 2 for x in avg_sharp_queue
-                ) / len(avg_sharp_queue)
+                ) ** 0.5 if len(sharp_queue) == W else 0.0
+                avg_lam_std = (
+                    sum((x - avg_lam_mean) ** 2 for x in avg_sharp_queue)
+                    / len(avg_sharp_queue)
+                )
                 frac_above = sum(1 for x in sharp_queue if x > 2.0) / len(sharp_queue)
 
                 if norm_sharpness > 2.0:
@@ -1101,6 +1049,7 @@ for task in range(10, 10 + args.runs):
 
                 if collapse_step_within_task is None and current_runlen >= K:
                     collapse_step_within_task = step_within_task
+
 
             # Sharpness Aware Minimization
             if args.sam:
@@ -1119,19 +1068,19 @@ for task in range(10, 10 + args.runs):
 
                 for p, e in zip(params, epsilons):
                     p.data.sub_(e)
-
+                
                 optimizer.step()
             else:
                 loss.backward()
                 if total_updates % args.log_interval == 0:
                     params = [p for p in model.parameters() if p.requires_grad]
                     grad_flat = torch.cat([p.grad.view(-1) for p in params])
-                    true_grad_norm_sq = (grad_flat.norm() ** 2).item()
+                    true_grad_norm_sq = (grad_flat.norm()**2).item()
                     var_grad = grad_flat.var(unbiased=False).item()
                     noise_power_full = (args.lr**2) * var_grad
                     noise_power_mb = (args.lr**2) * var_grad / args.batch_size
                 optimizer.step()
-
+                
                 # betas scheduling
                 if args.optimizer == "adam":
                     end = 2 * args.epochs
@@ -1142,9 +1091,10 @@ for task in range(10, 10 + args.runs):
                         beta1 = 0.99
                         beta2 = 0.75
                     if args.beta_schedule:
-                        optimizer.param_groups[0]["betas"] = (beta1, beta2)
+                        optimizer.param_groups[0]['betas'] = (beta1, beta2)
                 if args.lr_schedule != "constant":
                     scheduler.step()
+            
 
             # shrink perturb
             if args.reg == "shrink_perturb":
@@ -1168,23 +1118,25 @@ for task in range(10, 10 + args.runs):
                     "loss": loss.item(),
                     "update_norm": up_norm,
                     "weight_norm": wn,
+                    "ratio": up_norm / (wn + 1e-12),
                     # "average_use_val": avg_use_val,
                     "hessian_rank": hessian_rank,
                     # "trace_val": (
                     #     trace_val if total_updates % TRACE_INTERVAL == 0 else None
                     # ),
                     "sharpness": sharpness,
-                    "norm_sharpness": norm_sharpness,
-                    "runlen": current_runlen,  # how many consecutive steps ≥ 2, within this task
-                    "frac_above": frac_above,  # fraction of last W steps ≥ 2, within this task
+                    # "norm_sharpness": norm_sharpness,
+                    # "runlen": current_runlen,  # how many consecutive steps ≥ 2, within this task
+                    # "frac_above": frac_above,  # fraction of last W steps ≥ 2, within this task
                     "lam_mean": lam_mean,
                     "lam_std": lam_std,
+                    "lam_cv": lam_std / (lam_mean + 1e-12),
                     "task_lam_std": avg_lam_std,
                     # "lam_max / lam_5": ratio,
                     "lr": optimizer.param_groups[0]["lr"],
                     "true_grad_norm_sq": var_grad,
-                    "gradient_noise": noise_power_full,
-                    "gradient_noise_mb": noise_power_mb,
+                    # "gradient_noise": noise_power_full,
+                    # "gradient_noise_mb": noise_power_mb,
                     # "beta2": optimizer.param_groups[0]["betas"][1],
                     # "preconditioned_sharp": precond,
                     # **use_vals,
