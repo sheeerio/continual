@@ -15,8 +15,7 @@ from utils import misc, schedulers, optimizers
 from models import mlp, cnn
 from datasets import data_loader
 
-W = 20  # Window size for sharpness tracking
-K = 20
+W = 30  # Window size for sharpness tracking
 TRACE_INTERVAL = 200
 
 parser = get_parser()
@@ -104,7 +103,7 @@ run = wandb.init(
 wandb.define_metric("gradient_noise",   hidden=False)
 wandb.define_metric("gradient_noise_mb",hidden=False)
 wandb.define_metric("true_grad_norm_sq",hidden=False)
-wandb.define_metric("task_lam_std",     hidden=False)
+wandb.define_metric("task_lam_var",     hidden=False)
 
 results = {
     config.activation: {
@@ -124,7 +123,8 @@ for task in range(config.runs+1):
         optimizer.state.clear()
 
     sharp_queue = deque(maxlen=W)
-    avg_sharp_queue = deque(maxlen=config.epochs)
+    assert len(sharp_queue) == 0, "Sharpness queue should be empty at the start"
+
     current_runlen = 0
     step_within_task = 0
     collapse_step_within_task = None
@@ -264,18 +264,14 @@ for task in range(config.runs+1):
                 this_normalized_sharp += norm_sharpness
 
                 sharp_queue.append(norm_sharpness)
-                avg_sharp_queue.append(norm_sharpness)
-
-                lam_mean = sum(sharp_queue) / len(sharp_queue)
-                avg_lam_mean = sum(avg_sharp_queue) / len(avg_sharp_queue)
-                lam_std = (
-                    sum((x - lam_mean) ** 2 for x in sharp_queue) / len(sharp_queue)
-                ) ** 0.5 if len(sharp_queue) == W else 0.0
-                avg_lam_std = (
-                    sum((x - avg_lam_mean) ** 2 for x in avg_sharp_queue)
-                    / len(avg_sharp_queue)
-                )
-
+                if len(sharp_queue) == W:
+                    lam_mean = sum(sharp_queue) / len(sharp_queue)
+                    lam_var = (
+                        sum((x / lam_mean) ** 2 for x in sharp_queue) / len(sharp_queue)
+                    )
+                    
+                else:
+                    lam_mean, lam_var = 0.0, 0.0
 
             # Sharpness Aware Minimization
             if config.sam:
@@ -326,6 +322,7 @@ for task in range(config.runs+1):
             up_norm = delta.mean().item()
             sum_up += up_norm
             total_updates += 1
+            variation = norm_sharpness/lam_mean if lam_mean > 0 else 0.0
             if total_updates % config.log_interval == 0:
                 # use_vals = { f"use_{name}": optimizers.compute_use_for_activation(h) for name, h in activations.items() }
                 # avg_use_val = sum(use_vals.values()) / len(use_vals)
@@ -333,19 +330,20 @@ for task in range(config.runs+1):
                 log = {
                     "acc": acc,
                     "loss": loss.item(),
-                    "update_norm": up_norm,
-                    "weight_norm": wn,
-                    "ratio": up_norm / (wn + 1e-12),
+                    # "update_norm": up_norm,
+                    # "weight_norm": wn,
+                    # "ratio": up_norm / (wn + 1e-12),
                     # "average_use_val": avg_use_val,
-                    "hessian_rank": hessian_rank,
+                    # "hessian_rank": hessian_rank,
                     "sharpness": sharpness,
                     # "preconditioned_sharpness": precond,
-                    # "norm_sharpness": norm_sharpness,
+                    "norm_sharpness": norm_sharpness,
+                    "variation?": variation,
                     "lam_mean": lam_mean,
-                    "lam_std": lam_std,
-                    "lam_cv": lam_std / (lam_mean + 1e-12),
-                    "task_lam_std": avg_lam_std,
-                    "lr": optimizer.param_groups[0]["lr"],
+                    "lam_var": lam_var,
+                    "lam_cv": lam_var / (lam_mean + 1e-12),
+                    # "task_lam_var": avg_lam_var,
+                    # "lr": optimizer.param_groups[0]["lr"],
                     "true_grad_norm_sq": var_grad,
                     # "gradient_noise": noise_power_full,
                     # "gradient_noise_mb": noise_power_mb,
@@ -395,10 +393,10 @@ for task in range(config.runs+1):
     run.log(
         {
             "J": J,
-            "param_norm": pn,
-            "avg_norm_sharp": this_normalized_sharp / (config.epochs * len(loader)),
-            "average_update_norm": aun,
-            "effective_rank": effective_rank,
+            # "param_norm": pn,
+            # "avg_norm_sharp": this_normalized_sharp / (config.epochs * len(loader)),
+            # "average_update_norm": aun,
+            # "effective_rank": effective_rank,
             "task_acc": this_task_acc / (config.epochs * len(loader)),
         }
     )

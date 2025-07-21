@@ -208,11 +208,13 @@ def get_norm_sharpness(optimizer, sharpness):
 
 def get_betas(config, epoch):
     if config.optimizer == "adam":
-    end = 2 * config.epochs
-    if epoch < end:
-        beta1 = config.beta1 + (0.99 - config.beta1) * (epoch / (end))
-        beta2 = config.beta2 + (0.75 - config.beta2) * (epoch / (end))
+        end = 2 * config.epochs
+        if epoch < end:
+            beta1 = config.beta1 + (0.99 - config.beta1) * (epoch / (end))
+            beta2 = config.beta2 + (0.75 - config.beta2) * (epoch / (end))
+        else:
+            beta1 = 0.99
+            beta2 = 0.75
+        return (beta1, beta2)
     else:
-        beta1 = 0.99
-        beta2 = 0.75
-    return (beta1, beta2)
+        raise ValueError("Optimizer is not Adam, cannot get betas.")

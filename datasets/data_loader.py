@@ -13,7 +13,7 @@ def get_dataset(config):
             [transforms.ToTensor(), transforms.Normalize(DATA_MEAN, DATA_STD)]
         )
         full = MNIST(root="../data", train=True, download=True, transform=tf)
-        perm = torch.randperm(len(full))[:25600]
+        perm = torch.randperm(len(full))#[:25600]
         train_dataset = Subset(full, perm)
         test_dataset = MNIST(root="../data", train=False, download=True, transform=tf)
         in_ch = 1
