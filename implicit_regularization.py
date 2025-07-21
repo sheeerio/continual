@@ -308,19 +308,10 @@ for task in range(config.runs+1):
                 optimizer.step()
                 
                 # betas scheduling
-                if config.optimizer == "adam":
-                    end = 2 * config.epochs
-                    if epoch < end:
-                        beta1 = config.beta1 + (0.99 - config.beta1) * (epoch / (end))
-                        beta2 = config.beta2 + (0.75 - config.beta2) * (epoch / (end))
-                    else:
-                        beta1 = 0.99
-                        beta2 = 0.75
-                    if config.beta_schedule:
-                        optimizer.param_groups[0]['betas'] = (beta1, beta2)
+                optimizer.param_groups[0]['betas'] = optimizers.get_betas(config, epoch)
+                # lr schedule step
                 if config.lr_schedule != "constant":
                     scheduler.step()
-            
 
             # shrink perturb
             if config.reg == "shrink_perturb":

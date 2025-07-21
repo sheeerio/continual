@@ -125,7 +125,7 @@ COMMANDS=(
     
     # tp slides
     # "python3 implicit_regularization.py --seed=2025 --activation=relu --runs=5 --name=M_relu_reset --exp_name=tai --epochs=1000 --lr=1e-3 --dataset=MNIST --reset_optimizer --reset_model"
-    "python3 implicit_regularization.py --seed=2025 --activation=relu --runs=5 --name=wadk --exp_name=tai --epochs=100 --lr=1e-3 --dataset=MNIST --reset_optimizer"
+    # "python3 implicit_regularization.py --seed=2025 --activation=relu --runs=5 --name=wadk --exp_name=tai --epochs=100 --lr=1e-3 --dataset=MNIST --reset_optimizer"
     # "python3 implicit_regularization.py --seed=2025 --model=MLP --activation=relu --runs=5 --name=wadk --exp_name=tai --epochs=100 --lr=1e-3 --dataset=CIFAR10 --reset_optimizer"
     "python3 implicit_regularization.py --seed=2025 --model=CNN --activation=relu --runs=5 --name=cnn --exp_name=tai --epochs=100 --lr=1e-3 --dataset=MNIST --reset_optimizer"
     "python3 implicit_regularization.py --seed=2025 --activation=relu --runs=5 --name=ala --exp_name=tai --epochs=100 --lr=1e-3 --dataset=MNIST --reset_optimizer --lr_schedule=wsd"

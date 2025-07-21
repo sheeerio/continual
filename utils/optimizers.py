@@ -205,3 +205,14 @@ def get_norm_sharpness(optimizer, sharpness):
         norm_sharpness = sharpness
 
     return norm_sharpness
+
+def get_betas(config, epoch):
+    if config.optimizer == "adam":
+    end = 2 * config.epochs
+    if epoch < end:
+        beta1 = config.beta1 + (0.99 - config.beta1) * (epoch / (end))
+        beta2 = config.beta2 + (0.75 - config.beta2) * (epoch / (end))
+    else:
+        beta1 = 0.99
+        beta2 = 0.75
+    return (beta1, beta2)
