@@ -14,19 +14,27 @@ from config import get_parser
 from utils import misc, schedulers, optimizers
 from models import mlp, cnn
 from datasets import data_loader
-
-W = 30  # Window size for sharpness tracking
-TRACE_INTERVAL = 200
+from utils.optimizers import PerLayerLyapunovScheduler
 
 parser = get_parser()
 config = parser.parse_args()
+LENGTH_CHOICES = [100, 300, 50, 150]
 
 rho = config.sam_rho
 device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
 noise_power_full   = 0.0
 noise_power_mb     = 0.0
 
-misc.set_seed(config.seed)
+def set_seed(s):
+    random.seed(s)
+    np.random.seed(s)
+    torch.manual_seed(s)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(s)
+        torch.cuda.manual_seed_all(s)
+set_seed(config.seed)
+
+task_lengths = [random.choice(LENGTH_CHOICES) for _ in range(config.runs)]
 
 train_dataset, test_dataset, in_ch, input_size, DATA_MEAN, DATA_STD = data_loader.get_dataset(config)
 
@@ -69,20 +77,47 @@ if config.model in [
 ]:
     model.fc1.register_forward_hook(save_activations("l1"))
     model.fc2.register_forward_hook(save_activations("l2"))
-    model.fc3.register_forward_hook(save_activations("l3"))
+    # model.fc3.register_forward_hook(save_activations("l3"))
 else:
     model.fc1.register_forward_hook(save_activations("l1"))
+
+layer_map = {}
+for name, p in model.named_parameters():
+    if p.requires_grad:
+        layer = name.split('.')[0]          # "fc1.weight" -> "fc1"
+        layer_map.setdefault(layer, []).append(p)
+
+layer_groups = [
+    {'params': params, 'lr': config.lr, 'layer': layer}   # keep default wd, betas...
+    for layer, params in layer_map.items()
+]
+
+# ── one EMAState per layer ─────────────────────────────────────────────
+layer_states = {
+    layer : misc.EMAState(alphas=(0.01, 0.05, 0.5))   # same alphas you used globally
+    for layer in layer_map
+}
 
 criterion = nn.CrossEntropyLoss(reduction="mean")
 wd = config.l2_lambda if config.reg == "l2" else 0.0
 if config.optimizer == "adam":
-    optimizer = optim.Adam(model.parameters(), lr=config.lr, weight_decay=wd, betas=(0.9, config.beta2))
+    optimizer = optim.Adam(layer_groups, lr=config.lr, weight_decay=wd, betas=(0.9, config.beta2))
 elif config.optimizer == "sgd": 
     optimizer = torch.optim.SGD(model.parameters(), lr=config.lr, weight_decay=wd)
 
 #
+# base_optimizer = optimizer
+# optimizer = optimizers.CVSharpnessController(
+#     base_optimizer,
+#     target = 3.0,     # keep CV≈1
+#     k_lr   = 0.3,
+#     k_wd   = 0.15,
+#     band   = 0.05,
+#     window = 100
+# )
+
 run = wandb.init(
-    project=f"random_label_{config.dataset}",
+    project=f"rand_label_{config.dataset}",
     entity="sheerio",
     group=config.exp_name,
     name=config.name,
@@ -114,20 +149,41 @@ results = {
         "dormancy": [],
     }
 }
-for task in range(config.runs+1):
+
+sharp_state  = misc.EMAState(alphas=(0.01, 0.05, 0.5))
+lambda_state = misc.EMAState(alphas=(0.01, 0.05, 0.5))
+
+init_sigma_min = {}
+print_val = 0.
+for name, p in model.named_parameters():
+    if p.requires_grad and p.ndim >= 2:
+        # 1–3 inverse-power iterations are plenty at t=0
+        s0 = optimizers.power_iteration_sigma_min(p.detach(), iters=3).item()
+        init_sigma_min[name] = s0
+        print_val += s0
+        print(s0)
+print(print_val)
+
+task_lengths = [300, 50, 300, 300, 100, 300, 50, 150, 300, 100, 300, 50, 150, 300, 100, 300, 50, 150, 300, 100]
+for task in range(config.runs):
+    config.epochs = task_lengths[task] if config.random_length else config.epochs
+    print(config.epochs)
+
+    sharpness_volatility = []
+    sharpness_var = []
     if config.reset_model:
-        model = mlp.MLP(input_size, hidden, 10).to(device)
+        if config.model == "MLP":
+            model = mlp.MLP(input_size, hidden, 10).to(device)
+        elif config.model == "CNN":
+            model = cnn.CNN(in_ch).to(device)
+        elif config.model == "BatchNormCNN":
+            model = cnn.BatchNormCNN(in_ch).to(device)
+        else:
+            model = mlp.BatchNormMLP(input_size, hidden, 10).to(device)
         if config.optimizer == "adam":
             optimizer = optim.Adam(model.parameters(), lr=config.lr, weight_decay=wd, betas=(config.beta1, config.beta2))
     if config.optimizer == "adam" and config.reset_optimizer:
         optimizer.state.clear()
-
-    sharp_queue = deque(maxlen=W)
-    assert len(sharp_queue) == 0, "Sharpness queue should be empty at the start"
-
-    current_runlen = 0
-    step_within_task = 0
-    collapse_step_within_task = None
 
     if config.dataset == "PermutedMNIST":
         perm_tf = make_perm_tf(task)
@@ -158,10 +214,11 @@ for task in range(config.runs+1):
 
     total_updates = 0
     if total_updates % config.log_interval == 0:
-        hessian_rank = optimizers.empirical_fischer_rank(model, train_dataset, device)
+        hessian_rank = optimizers.empirical_fischer_rank(model, train_dataset, device, cfg=config)
 
     model.train()
-    
+    ly_sched = None
+    scheduler = None
     if config.lr_schedule == "linear":
         total_steps = config.epochs * math.ceil(len(train_dataset) / config.batch_size)
         initial_lr = config.lr
@@ -198,12 +255,35 @@ for task in range(config.runs+1):
         scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=schedulers.power_lambda)
     elif config.lr_schedule == "skew":
         scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=schedulers.skew_lambda)
+    elif config.lr_schedule == "lyapunov":
+        # hyper-params exposed to the CLI for convenience
+        ly_safety = config.ly_safety
+        ly_cool   = config.ly_cool
+        ly_warm   = config.ly_warm
+        ly_sched  = optimizers.LyapunovScheduler(optimizer,
+                                    ema_state = sharp_state,   # <<– share!
+                                    safety    = ly_safety,
+                                    cool      = ly_cool,
+                                    warm      = ly_warm)
+        scheduler = None
+    elif config.lr_schedule == "pl_lyapunov":
+        pl_scheduler = PerLayerLyapunovScheduler(
+            optimizer      = optimizer,
+            layer_states   = layer_states,
+            safety         = config.pl_lyap_safety,
+            cool           = config.pl_lyap_cool,
+            warm           = config.pl_lyap_warm,
+        )
+
     else:
         scheduler = None
 
     sum_up = 0.0
     this_task_acc = 0.0
     this_normalized_sharp = 0.0
+    # if task == config.runs - 1:
+    #     config.epochs = 1500
+    cached_sigma_min = {}
     for epoch in range(config.epochs):
         for x, y in loader:
             if config.model in ["CNN", "BatchNormCNN"]:
@@ -234,44 +314,90 @@ for task in range(config.runs+1):
                     if p.requires_grad and p.ndim >= 2:
                         reg += (optimizers.power_iteration(p, 1).pow(config.spectral_k) - 1.0).pow(2)
                 reg *= config.spectral_lambda
+            elif config.reg == "ortho":
+                frac = config.ortho_frac
+                for name, p in model.named_parameters():
+                    if p.ndim < 2 or not p.requires_grad:
+                        continue
+
+                    if total_updates % config.ortho_interval == 0:
+                        sigma_now = optimizers.power_iteration_sigma_min(p, iters=1).detach()
+                        cached_sigma_min[name] = sigma_now
+                    else:
+                        sigma_now = cached_sigma_min.get(
+                            name,
+                            optimizers.power_iteration_sigma_min(p, iters=1).detach()
+                        )
+
+                    target = frac * init_sigma_min[name]
+                    reg   += (sigma_now - target).pow(2)
+                reg *= config.ortho_lambda
+            elif config.reg == "orthofrob":
+                for name, p in model.named_parameters():
+                    if p.ndim >= 2 and p.requires_grad:
+                        W = p.view(p.shape[0], -1)
+                        k = W.shape[1]
+                        I = torch.eye(k, device=W.device, dtype=W.dtype)
+                        reg += (W.t() @ W - I).pow(2).sum()
+                reg *= config.ortho_lambda
             
             loss = base + reg
             params = [p for p in model.parameters() if p.requires_grad]
             old = [p.data.clone() for p in params]
 
-            nus = [
-                optimizer.state[p]["exp_avg_sq"]
-                for p in optimizer.param_groups[0]["params"]
-                if "exp_avg_sq" in optimizer.state[p]
-            ]
+            # nus = [
+            #     optimizer.state[p]["exp_avg_sq"]
+            #     for p in optimizer.param_groups[0]["params"]
+            #     if "exp_avg_sq" in optimizer.state[p]
+            # ]
 
             # if total_updates % TRACE_INTERVAL == 0:
             #     trace_val = optimizers.hessian_trace(loss, params, n_samples=10)
 
             if total_updates % config.log_interval == 0:
-                # nus = [
-                # optimizer.state[p]["exp_avg_sq"]
-                # for p in optimizer.param_groups[0]["params"]
-                # if "exp_avg_sq" in optimizer.state[p]
-                # ]
-                # precond = ( optimizers.preconditioned_sharpness(loss, params, nus, epsilon=optimizer.param_groups[0].get("eps",1e-8)) 
-                #             if len(nus) else None )
+                layer_eff_lrs = optimizers.per_layer_effective_lr(model, optimizer)
+                for layer, params in layer_map.items():
+                    # (a) top eigen-value of this layer’s Hessian block
+                    lam = optimizers.estimate_hessian_topk(model, loss, params, k=1)[0]
+
+                    # (b) normalize the sharpness exactly like you do globally
+                    norm_lam = optimizers.get_norm_sharpness(optimizer, lam, config)
+
+                    # (c) update EMA statistics and grab scalars
+                    eff_lr = layer_eff_lrs.get(layer, optimizer.param_groups[0]["lr"])
+                    state, scalars   = misc.update_stat(norm_lam, layer_states[layer], eff_lr)
+
+                    if config.lr_schedule == "pl_lyapunov":
+                        lr_star = pl_scheduler.step(layer, eff_lr, scalars["tau"])
+
+                    # (d) log everything with a nice prefix
+                    wandb.log({
+                        f"{layer}/sharp" : norm_lam,
+                        f"{layer}/mu"    : scalars["lam_mean"],
+                        f"{layer}/tau"   : scalars["tau"],
+                        f"{layer}/cv"    : scalars["lam_cv"],
+                        f"{layer}/eff_lr": eff_lr,
+                        f"{layer}/predict": scalars["collapse_pred"],
+                        "reg":              reg
+                    })
+
                 eigs = optimizers.estimate_hessian_topk(model, loss, params, k=1)
                 sharpness = eigs[0]
-                # eig_ratio = eigs[0] / (eigs[4] + 1e-12)
+                lambda_min = optimizers.estimate_hessian_min_eig(model, loss, params, iters=20)
 
-                norm_sharpness = optimizers.get_norm_sharpness(optimizer, sharpness)
-                this_normalized_sharp += norm_sharpness
+                norm_sharpness = optimizers.get_norm_sharpness(optimizer, sharpness, config)
+                lambda_min_norm = optimizers.get_norm_sharpness(optimizer, lambda_min, config)
+                this_normalized_sharp += norm_sharpness 
 
-                sharp_queue.append(norm_sharpness)
-                if len(sharp_queue) == W:
-                    lam_mean = sum(sharp_queue) / len(sharp_queue)
-                    lam_var = (
-                        sum((x / lam_mean) ** 2 for x in sharp_queue) / len(sharp_queue)
-                    )
-                    
+                effective_lr = optimizers.compute_adam_effective_lr(optimizer)
+
+                sharp_state,  sharp_log  = misc.update_stat(norm_sharpness,  sharp_state,  effective_lr)
+                lambda_state, lambda_log = misc.update_stat(lambda_min_norm, lambda_state, effective_lr) 
+                if ly_sched is not None:
+                    lr_star, _ = ly_sched.step(effective_lr, lambda_log["tau"])
+                    log_extra  = {"ly_lr_star": lr_star}
                 else:
-                    lam_mean, lam_var = 0.0, 0.0
+                    log_extra  = {}
 
             # Sharpness Aware Minimization
             if config.sam:
@@ -291,7 +417,6 @@ for task in range(config.runs+1):
                 for p, e in zip(params, epsilons):
                     p.data.sub_(e)
                 
-                optimizer.step()
             else:
                 loss.backward(retain_graph=True)
                 if total_updates % config.log_interval == 0:
@@ -306,8 +431,13 @@ for task in range(config.runs+1):
                 # betas scheduling
                 optimizer.param_groups[0]['betas'] = optimizers.get_betas(config, epoch)
                 # lr schedule step
-                if config.lr_schedule != "constant":
-                    scheduler.step()
+                if config.lr_schedule != "constant" and scheduler is not None:
+                    scheduler.step()    
+                # if ly_sched is not None:
+                #     lr_star, _ = ly_sched.step(effective_lr, lambda_log["tau"])
+                #     log_extra  = {"ly_lr_star": lr_star}
+                # else:
+                #     log_extra  = {}
 
             # shrink perturb
             if config.reg == "shrink_perturb":
@@ -319,32 +449,46 @@ for task in range(config.runs+1):
             delta = torch.cat(
                 [(p.data - o).view(-1).abs() for p, o in zip(params, old)]
             )
-            up_norm = delta.mean().item()
-            sum_up += up_norm
+            update_norm = delta.mean().item()
+            sum_up += update_norm
             total_updates += 1
-            variation = norm_sharpness/lam_mean if lam_mean > 0 else 0.0
+            
             if total_updates % config.log_interval == 0:
                 # use_vals = { f"use_{name}": optimizers.compute_use_for_activation(h) for name, h in activations.items() }
                 # avg_use_val = sum(use_vals.values()) / len(use_vals)
+                gg, x = 0., 0.
+                for name, p in model.named_parameters():
+                    if p.requires_grad and p.dim() >= 2:
+                        # 1–3 inverse-power iterations are plenty at t=0
+                        s0 = optimizers.power_iteration_sigma_min(p.detach(), iters=1).item()
+                        gg += s0
+                # print(print_val)
+                gg, x = 0., 0.
+                for n, p in model.named_parameters():
+                    if p.requires_grad and p.ndim >= 2:
+                        x += 1
+                        gg += optimizers.power_iteration(p, 1).pow(config.spectral_k)
+                gg = gg / x
                 wn = torch.cat([p.data.view(-1).abs() for p in params]).mean().item()
                 log = {
                     "acc": acc,
                     "loss": loss.item(),
-                    # "update_norm": up_norm,
-                    # "weight_norm": wn,
-                    # "ratio": up_norm / (wn + 1e-12),
+                    "update_norm": update_norm,
+                    "weight_norm": wn,
+                    "ratio": update_norm / (wn + 1e-12),
                     # "average_use_val": avg_use_val,
-                    # "hessian_rank": hessian_rank,
+                    "hessian_rank": hessian_rank,
                     "sharpness": sharpness,
                     # "preconditioned_sharpness": precond,
-                    "norm_sharpness": norm_sharpness,
-                    "variation?": variation,
-                    "lam_mean": lam_mean,
-                    "lam_var": lam_var,
-                    "lam_cv": lam_var / (lam_mean + 1e-12),
                     # "task_lam_var": avg_lam_var,
-                    # "lr": optimizer.param_groups[0]["lr"],
+                    "lr": optimizer.param_groups[0]["lr"],
                     "true_grad_norm_sq": var_grad,
+                    "effective_lr": effective_lr,
+                    **init_sigma_min,
+                    "max_singular": gg,
+                    **sharp_log,                                   # sharpness stats
+                    # **{f"lam_{k}": v for k, v in lambda_log.items()},
+                    **log_extra,               # only when ly_sched is active
                     # "gradient_noise": noise_power_full,
                     # "gradient_noise_mb": noise_power_mb,
                     # "beta2": optimizer.param_groups[0]["betas"][1],
@@ -357,6 +501,7 @@ for task in range(config.runs+1):
                 run.log(log)
         if scheduler is not None:
             scheduler.step()
+
 
     model.eval()
     eval_loader = data.DataLoader(
@@ -393,10 +538,10 @@ for task in range(config.runs+1):
     run.log(
         {
             "J": J,
-            # "param_norm": pn,
-            # "avg_norm_sharp": this_normalized_sharp / (config.epochs * len(loader)),
-            # "average_update_norm": aun,
-            # "effective_rank": effective_rank,
+            "param_norm": pn,
+            "avg_norm_sharp": this_normalized_sharp / (config.epochs * len(loader)),
+            "average_update_norm": aun,
+            "effective_rank": effective_rank,
             "task_acc": this_task_acc / (config.epochs * len(loader)),
         }
     )
