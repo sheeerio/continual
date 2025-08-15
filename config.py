@@ -210,7 +210,7 @@ def get_parser():
     parser.add_argument("--ly_window", type=int, default=30)
     parser.add_argument("--ly_safety", type=float, default=0.8)
     parser.add_argument("--ly_cool",   type=float, default=0.95)
-    parser.add_argument("--ly_warm",   type=float, default=1.05)
+    parser.add_argument("--ly_warm",   type=float, default=1.01)
 
     parser.add_argument("--ortho_lambda", type=float, default=1e-3)
     parser.add_argument("--ortho_frac", type=float, default=2)
@@ -222,7 +222,7 @@ def get_parser():
     # tweakables – exposed so you can play in wandb sweeps
     grp.add_argument("--pl_lyap_safety", type=float, default=0.8)
     grp.add_argument("--pl_lyap_cool",   type=float, default=0.9)
-    grp.add_argument("--pl_lyap_warm",   type=float, default=1.05)
+    grp.add_argument("--pl_lyap_warm",   type=float, default=1.01)
     grp.add_argument("--pl_lyap_iters",  type=int,   default=20,
                     help="Power-iter steps for sharpness on each layer")
 

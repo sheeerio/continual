@@ -7,6 +7,27 @@ MAX_PARALLEL_JOBS=4 # Adjust this based on your RTX 3070 Ti's memory and perform
 
 # List of commands to run
 COMMANDS=(
+    # "python3 implicit_regularization.py --epochs 100 --seed 2 --model MLP --activation relu --runs 10 --reg wass --wass_lambda 1e-3 --batch_size 256 --optimizer adam --lr 1e-3 --dataset MNIST --name wass_1e-3 --exp_name cl"
+    # "python3 implicit_regularization.py --epochs 100 --seed 2 --model MLP --activation relu --runs 10 --reg wass --wass_lambda 1e-2 --batch_size 256 --optimizer adam --lr 1e-3 --dataset MNIST --name wass_1e-2 --exp_name cl"
+    # "python3 implicit_regularization.py --epochs 100 --seed 2 --model MLP --activation relu --runs 10 --reg wass --wass_lambda 1e-3 --name=wass_1e-3_ply --exp_name cl --lr 1e-3 --dataset=MNIST --lr_schedule pl_lyapunov"
+    # "python3 implicit_regularization.py --epochs 100 --seed 2 --model MLP --activation relu --runs 10 --reg wass --wass_lambda 1e-3 --name=wass_1e-3_ly --exp_name cl --lr 1e-3 --dataset=MNIST --lr_schedule lyapunov"
+    # "python3 implicit_regularization.py --epochs 100 --seed 1 --model MLP --activation relu --runs 10 --reg wass --wass_lambda 1e-3 --name=wass_1e-3_ly --exp_name cl --lr 1e-3 --dataset=MNIST --lr_schedule lyapunov"
+    # "python3 implicit_regularization.py --epochs 100 --seed 2 --model MLP --activation relu --runs 10 --batch_size 256 --optimizer adam --lr 1e-3 --dataset MNIST --name relu --exp_name cl"
+    # "python3 implicit_regularization.py --epochs 100 --seed 2 --model MLP --activation relu --runs 10 --reg l2 --l2_lambda 1e-3 --batch_size 256 --optimizer adam --lr 1e-3 --dataset MNIST --name l2_1e-3 --exp_name cl"
+    "python3 implicit_regularization.py --seed 1 --epochs 100 --model=MLP --activation=relu --runs=10 --reg=spectral --spectral_lambda=1e-3 --name=spectral_1e-3 --exp_name cl --lr=1e-3 --dataset=MNIST"
+    "python3 implicit_regularization.py --seed 1 --epochs 100 --model=MLP --activation=relu --runs=10 --reg=spectral --spectral_lambda=1e-2 --name=spectral_1e-2 --exp_name cl --lr=1e-3 --dataset=MNIST"
+    "python3 implicit_regularization.py --seed 1 --epochs 100 --model=MLP --activation=relu --runs=10 --reg=spectral --spectral_lambda=1e-4 --name=spectral_1e-4 --exp_name cl --lr=1e-3 --dataset=MNIST"
+    # "python3 implicit_regularization.py --seed 1 --activation=crelu --runs=10 --name=crelu --exp_name cl --epochs 100 --lr=1e-3 --dataset=MNIST"
+    # "python3 implicit_regularization.py --seed 1 --runs=10 --epochs=100 --model=BatchNormMLP --activation=relu --reg=l2 --l2_lambda=1e-3 --name bn+l2_1e-3 --exp_name cl"
+    # "python3 implicit_regularization.py --seed 1 --runs=10 --epochs=100 --model=BatchNormMLP --activation=relu --reg=l2 --l2_lambda=1e-2 --name bn+l2_1e-2 --exp_name cl"
+    # "python3 implicit_regularization.py --seed 1 --runs=10 --epochs=100 --model=BatchNormMLP --activation=relu --name bn --exp_name cl"
+    # "python3 implicit_regularization.py --seed 2 --epochs 100 --model=MLP --activation=relu --runs=10 --reg=spectral --spectral_lambda=1e-3 --name=spectral_1e-3 --exp_name cl --lr=1e-3 --dataset=MNIST"
+    # "python3 implicit_regularization.py --seed 2 --epochs 100 --model=MLP --activation=relu --runs=10 --reg=spectral --spectral_lambda=1e-2 --name=spectral_1e-2 --exp_name cl --lr=1e-3 --dataset=MNIST"
+    # "python3 implicit_regularization.py --seed 2 --epochs 100 --model=MLP --activation=relu --runs=10 --reg=spectral --spectral_lambda=1e-4 --name=spectral_1e-4 --exp_name cl --lr=1e-3 --dataset=MNIST"
+    # "python3 implicit_regularization.py --seed 2 --activation=crelu --runs=10 --name=crelu --exp_name cl --epochs 100 --lr=1e-3 --dataset=MNIST"
+    # "python3 implicit_regularization.py --seed 2 --runs=10 --epochs=100 --model=BatchNormMLP --activation=relu --reg=l2 --l2_lambda=1e-3 --name bn+l2_1e-3 --exp_name cl"
+    # "python3 implicit_regularization.py --seed 2 --runs=10 --epochs=100 --model=BatchNormMLP --activation=relu --reg=l2 --l2_lambda=1e-2 --name bn+l2_1e-2 --exp_name cl"
+    # "python3 implicit_regularization.py --seed 2 --runs=10 --epochs=100 --model=BatchNormMLP --activation=relu --name bn --exp_name cl"
     # "python3 implicit_regularization.py --seed=2025 --activation=adalin --runs=4 --name=3uniform_adalin7 --alpha=0.7 --exp_name=partial_adam"
     # "python3 implicit_regularization.py --seed=2025 --model=MLP --activation=adalin --runs=4 --name=3uniform_adalin7+l2 --alpha=0.7 --exp_name=partial_adam --reg=l2 --l2_lambda=5e-4"
     # "python3 implicit_regularization.py --seed=2025 --model=BatchNormMLP --activation=adalin --runs=4 --name=3uniform_bn+adalin7+l2 --alpha=0.7 --exp_name=partial_adam --reg=l2 --l2_lambda=5e-4"
@@ -174,15 +195,16 @@ COMMANDS=(
     # "python3 implicit_regularization.py --seed 1 --model MLP --reg ortho --activation relu --runs 5 --batch_size 256 --optimizer adam --lr 1e-3 --dataset MNIST --name ortho_1e-2_2 --epochs=100 --ortho_lambda=1e-2 --ortho_frac=2"
 
     
-    # "python3 implicit_regularization.py --seed 1 --model MLP --reg orthofrob --activation relu --runs 5 --batch_size 256 --optimizer adam --lr 1e-3 --dataset MNIST --name ortho_frob --epochs=100"
-    # "python3 implicit_regularization.py --seed 2 --model MLP --reg orthofrob --activation relu --runs 5 --batch_size 256 --optimizer adam --lr 1e-3 --dataset MNIST --name ortho_frob --epochs=100"
+    # "python3 implicit_regularization.py --seed 1 --model MLP --reg orthofrob --activation relu --runs 10 --batch_size 256 --optimizer adam --lr 1e-3 --dataset MNIST --name ortho_frob --epochs=100"
+    # "python3 implicit_regularization.py --seed 2 --model MLP --reg orthofrob --activation relu --runs 10 --batch_size 256 --optimizer adam --lr 1e-3 --dataset MNIST --name ortho_frob --epochs=100"
 
     # "python3 implicit_regularization.py --seed 1 --model MLP --reg orthofrob --activation relu --runs 5 --batch_size 256 --optimizer adam --lr 1e-3 --dataset MNIST --name orthofrob_1e-1_1 --epochs=100 --ortho_interval=1 --ortho_lambda=1e-1 --ortho_frac=1"
     # "python3 implicit_regularization.py --seed 1 --model MLP --reg orthofrob --activation relu --runs 5 --batch_size 256 --optimizer adam --lr 1e-3 --dataset MNIST --name orthofrob_1e-2_1 --epochs=100 --ortho_interval=1 --ortho_lambda=1e-2 --ortho_frac=1"
     # "python3 implicit_regularization.py --seed 1 --model MLP --reg orthofrob --activation relu --runs 5 --batch_size 256 --optimizer adam --lr 1e-3 --dataset MNIST --name orthofrob_1e-3_1 --epochs=100 --ortho_interval=1 --ortho_lambda=1e-3 --ortho_frac=1"
-    # "python3 implicit_regularization.py --seed 1 --model MLP --reg orthofrob --activation relu --runs 5 --batch_size 256 --optimizer adam --lr 1e-3 --dataset MNIST --name orthofrob_1e-4_1 --epochs=100 --ortho_interval=1 --ortho_lambda=1e-4 --ortho_frac=1"
-    # "python3 implicit_regularization.py --seed 1 --model MLP --reg orthofrob --activation relu --runs 5 --batch_size 256 --optimizer adam --lr 1e-3 --dataset MNIST --name orthofrob_1e-5_1 --epochs=100 --ortho_interval=1 --ortho_lambda=1e-5 --ortho_frac=1"
-
+    # # # # # # # # # # # #
+    # new ones that is cool
+    # "python3 implicit_regularization.py -seed 2 --model MLP --reg orthofrob --activation relu --runs 20 --batch_size 256 --optimizer adam --lr 1e-3 --dataset MNIST --name orthofrob_1e-5_ply --epochs=100 --ortho_interval=1 --ortho_lambda=1e-5 --ortho_frac=1 --lr_schedule pl_lyapunov"
+    # # # # # # # # # # # # #
     # "python3 implicit_regularization.py --seed=2025 --activation=relu --runs=5 --name=mlp --exp_name=new --epochs=100 --lr=1e-3 --dataset=MNIST "
     # "python3 implicit_regularization.py --seed=2026 --activation=relu --runs=5 --name=mlp --exp_name=new --epochs=100 --lr=1e-3 --dataset=MNIST "
     # "python3 implicit_regularization.py --seed=2027 --activation=relu --runs=5 --name=mlp --exp_name=new --epochs=100 --lr=1e-3 --dataset=MNIST "
@@ -223,10 +245,13 @@ COMMANDS=(
     # "python3 implicit_regularization.py --epochs 150 --seed 2 --model MLP --reg l2 --l2_lambda 1e-4 --activation relu --runs 20 --batch_size 256 --optimizer adam --lr 1e-3 --dataset MNIST --name l2_1e-4_ly --lr_schedule lyapunov" 
     # "python3 implicit_regularization.py --epochs 150 --seed 2 --model MLP --reg l2 --l2_lambda 1e-4 --activation relu --runs 20 --batch_size 256 --optimizer adam --lr 1e-3 --dataset MNIST --name l2_1e-4" 
 
-    # "python3 implicit_regularization.py --epochs 150 --seed 1 --model MLP --reg l2 --l2_lambda 1e-3 --activation relu --runs 20 --batch_size 256 --optimizer adam --lr 1e-3 --dataset MNIST --name l2_1e-3_ply --lr_schedule pl_lyapunov" 
-    # "python3 implicit_regularization.py --epochs 150 --seed 1 --model MLP --reg l2 --l2_lambda 1e-3 --activation relu --runs 20 --batch_size 256 --optimizer adam --lr 1e-3 --dataset MNIST --name l2_1e-3_ly --lr_schedule lyapunov" 
-    # "python3 implicit_regularization.py --epochs 150 --seed 1 --model MLP --reg l2 --l2_lambda 1e-3 --activation relu --runs 20 --batch_size 256 --optimizer adam --lr 1e-3 --dataset MNIST --name l2_1e-3" 
-    "python3 implicit_regularization.py --epochs 150 --seed 1 --model MLP --reg l2 --l2_lambda 1e-3 --activation relu --runs 20 --batch_size 256 --optimizer adam --lr 1e-3 --dataset MNIST --name l2_1e-3_reset --reset_model" 
+    # "python3 implicit_regularization.py --epochs 150 --seed 1 --model MLP --activation relu --runs 20 --batch_size 256 --optimizer adam --lr 1e-3 --dataset MNIST --name relu_ply --lr_schedule pl_lyapunov" 
+    # "python3 implicit_regularization.py --epochs 150 --seed 1 --model MLP --activation relu --runs 20 --batch_size 256 --optimizer adam --lr 1e-3 --dataset MNIST --name relu_ly --lr_schedule lyapunov" 
+    # "python3 implicit_regularization.py --epochs 150 --seed 1 --model MLP --activation relu --runs 20 --batch_size 256 --optimizer adam --lr 1e-3 --dataset MNIST --name relu" 
+    # "python3 implicit_regularization.py --epochs 150 --seed 2 --model MLP --activation relu --runs 20 --batch_size 256 --optimizer adam --lr 1e-3 --dataset MNIST --name relu_ply --lr_schedule pl_lyapunov" 
+    # "python3 implicit_regularization.py --epochs 150 --seed 2 --model MLP --activation relu --runs 20 --batch_size 256 --optimizer adam --lr 1e-3 --dataset MNIST --name relu_ly --lr_schedule lyapunov" 
+    # "python3 implicit_regularization.py --epochs 150 --seed 2 --model MLP --activation relu --runs 20 --batch_size 256 --optimizer adam --lr 1e-3 --dataset MNIST --name relu" 
+    # "python3 implicit_regularization.py --epochs 200 --seed 1 --model MLP --reg l2 --l2_lambda 1e-3 --activation relu --runs 20 --batch_size 256 --optimizer adam --lr 1e-3 --dataset MNIST --name l2_1e-3_reset --reset_model" 
     
     # "python3 implicit_regularization.py --epochs 200 --seed 2 --model MLP --reg l2 --l2_lambda 1e-2 --activation relu --runs 100 --batch_size 256 --optimizer adam --lr 1e-3 --dataset MNIST --name l2_1e-2_ply --lr_schedule pl_lyapunov" 
     # "python3 implicit_regularization.py --epochs 200 --seed 2 --model MLP --reg l2 --l2_lambda 1e-2 --activation relu --runs 100 --batch_size 256 --optimizer adam --lr 1e-3 --dataset MNIST --name l2_1e-2_ly --lr_schedule lyapunov" 
@@ -282,14 +307,32 @@ COMMANDS=(
     # "python3 implicit_regularization.py --seed 1 --model MLP --activation relu --runs 20 --batch_size 256 --optimizer adam --lr 1e-3 --dataset MNIST --name relu_ly_cool_0.9 --lr_schedule lyapunov --ly_cool 0.9" 
     # "python3 implicit_regularization.py --seed 1 --model MLP --activation relu --runs 20 --batch_size 256 --optimizer adam --lr 1e-3 --dataset MNIST --name relu_ly_cool_0.7 --lr_schedule lyapunov --ly_cool 0.7" 
     # "python3 implicit_regularization.py --seed 1 --model MLP --activation relu --runs 20 --batch_size 256 --optimizer adam --lr 1e-3 --dataset MNIST --name relu_ly_cool_0.5 --lr_schedule lyapunov --ly_cool 0.5" 
-
-    # "python3 implicit_regularization.py --seed 2025 --model MLP --activation relu --runs 5 --reg wass --wass_lambda 1e-3 --batch_size 256 --optimizer adam --lr 1e-3 --dataset MNIST --name wass --exp_name new"
+    # "python3 implicit_regularization.py --epochs 100 --seed 2025 --model MLP --activation relu --runs 10 --reg wass --wass_lambda 1e-3 --batch_size 256 --optimizer adam --lr 1e-3 --dataset MNIST --name wass_ --exp_name cl"
+    # "python3 implicit_regularization.py --epochs 100 --seed 2025 --model MLP --activation relu --runs 10 --batch_size 256 --optimizer adam --lr 1e-3 --dataset MNIST --name relu --exp_name cl"
     # "python3 implicit_regularization.py --seed 2026 --model MLP --activation relu --runs 20 --reg wass --wass_lambda 1e-3 --batch_size 256 --optimizer adam --lr 1e-3 --epochs 300 --dataset MNIST --name wass --exp_name new"
     # "python3 implicit_regularization.py --seed 2027 --model MLP --activation relu --runs 20 --reg wass --wass_lambda 1e-3 --batch_size 256 --optimizer adam --lr 1e-3 --epochs 300 --dataset MNIST --name wass --exp_name new"
     # "python3 implicit_regularization.py --model=BatchNormMLP --seed=2025 --activation=relu --runs=5 --name=batchnorm --exp_name=new --epochs=100 --lr=1e-3 --dataset=MNIST"
     # "python3 implicit_regularization.py --seed=2025 --activation=relu --runs=5 -me=ala --exp_name=new --epochs=100 --lr=1e-3 --dataset=MNIST  --lr_schedule=skew"
-    # "python3 implicit_regularization.py --epochs=100 --seed=2025 --model=MLP --activation=relu --runs=15 --reg=spectral --spectral_lambda=1e-3 --name=spectral --lr=1e-3 --dataset=MNIST"
-    # "python3 implicit_regularization.py --epochs=100 --seed=2026 --model=MLP --activation=relu --runs=15 --reg=spectral --spectral_lambda=1e-4 --name=spectral --exp_name=new --lr=1e-3 --dataset=MNIST"
+    # "python3 implicit_regularization.py --epochs 200 --seed 1 --model MLP --activation relu --runs 10 --reg wass --wass_lambda 1e-2 --name=wass_1e-2_ply_n --exp_name new --lr 1e-3 --dataset=MNIST --lr_schedule pl_lyapunov"
+    # "python3 implicit_regularization.py --epochs 200 --seed 1 --model MLP --activation relu --runs 10 --reg wass --wass_lambda 1e-3 --name=wass_1e-3_ply_n --exp_name new --lr 1e-3 --dataset=MNIST --lr_schedule pl_lyapunov"
+    # "python3 implicit_regularization.py --epochs 200 --seed 1 --model MLP --activation relu --runs 10 --reg wass --wass_lambda 1e-2 --name=wass_1e-2_ly_n --exp_name new --lr 1e-3 --dataset=MNIST --lr_schedule lyapunov"
+    # "python3 implicit_regularization.py --epochs 200 --seed 1 --model MLP --activation relu --runs 10 --reg wass --wass_lambda 1e-3 --name=wass_1e-3_ly_n --exp_name new --lr 1e-3 --dataset=MNIST --lr_schedule lyapunov"
+
+    # "python3 implicit_regularization.py --epochs 200 --seed 2 --model MLP --activation relu --runs 10 --reg wass --wass_lambda 1e-2 --name=wass_1e-2_ply_n --exp_name new --lr 1e-3 --dataset=MNIST --lr_schedule pl_lyapunov"
+    # "python3 implicit_regularization.py --epochs 200 --seed 2 --model MLP --activation relu --runs 10 --reg wass --wass_lambda 1e-3 --name=wass_1e-3_ply_n --exp_name new --lr 1e-3 --dataset=MNIST --lr_schedule pl_lyapunov"
+    # "python3 implicit_regularization.py --epochs 200 --seed 2 --model MLP --activation relu --runs 10 --reg wass --wass_lambda 1e-2 --name=wass_1e-2_ly_n --exp_name new --lr 1e-3 --dataset=MNIST --lr_schedule lyapunov"
+    # "python3 implicit_regularization.py --epochs 200 --seed 2 --model MLP --activation relu --runs 10 --reg wass --wass_lambda 1e-3 --name=wass_1e-3_ly_n --exp_name new --lr 1e-3 --dataset=MNIST --lr_schedule lyapunov"
+
+    # "python3 implicit_regularization.py --epochs 200 --seed 1 --model MLP --activation relu --runs 10 --reg l2 --l2_lambda 1e-2 --name=l2_1e-2_ply_n --exp_name new --lr 1e-3 --dataset=MNIST --lr_schedule pl_lyapunov"
+    # "python3 implicit_regularization.py --epochs 200 --seed 1 --model MLP --activation relu --runs 10 --reg l2 --l2_lambda 1e-3 --name=l2_1e-3_ply_n --exp_name new --lr 1e-3 --dataset=MNIST --lr_schedule pl_lyapunov"
+    # "python3 implicit_regularization.py --epochs 200 --seed 1 --model MLP --activation relu --runs 10 --reg l2 --l2_lambda 1e-2 --name=l2_1e-2_ly_n --exp_name new --lr 1e-3 --dataset=MNIST --lr_schedule lyapunov"
+    # "python3 implicit_regularization.py --epochs 200 --seed 1 --model MLP --activation relu --runs 10 --reg l2 --l2_lambda 1e-3 --name=l2_1e-3_ly_n --exp_name new --lr 1e-3 --dataset=MNIST --lr_schedule lyapunov"
+
+    # "python3 implicit_regularization.py --epochs 200 --seed 2 --model MLP --activation relu --runs 10 --reg l2 --l2_lambda 1e-2 --name=l2_1e-2_ply_n --exp_name new --lr 1e-3 --dataset=MNIST --lr_schedule pl_lyapunov"
+    # "python3 implicit_regularization.py --epochs 200 --seed 2 --model MLP --activation relu --runs 10 --reg l2 --l2_lambda 1e-3 --name=l2_1e-3_ply_n --exp_name new --lr 1e-3 --dataset=MNIST --lr_schedule pl_lyapunov"
+    # "python3 implicit_regularization.py --epochs 200 --seed 2 --model MLP --activation relu --runs 10 --reg l2 --l2_lambda 1e-2 --name=l2_1e-2_ly_n --exp_name new --lr 1e-3 --dataset=MNIST --lr_schedule lyapunov"
+    # "python3 implicit_regularization.py --epochs 200 --seed 2 --model MLP --activation relu --runs 10 --reg l2 --l2_lambda 1e-3 --name=l2_1e-3_ly_n --exp_name new --lr 1e-3 --dataset=MNIST --lr_schedule lyapunov"
+
     # "python3 implicit_regularization.py --epochs=100 --seed=2027 --model=MLP --activation=relu --runs=15 --reg=spectral --spectral_lambda=1e-4 --name=spectral --exp_name=new --lr=1e-3 --dataset=MNIST"
     # "python3 implicit_regularization.py --seed=2026 --activation=relu --runs=5 --name=M_relu_reset --exp_name=new --epochs=200 --lr=1e-3 --dataset=MNIST  --reset_model"
 

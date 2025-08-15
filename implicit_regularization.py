@@ -18,6 +18,8 @@ from utils.optimizers import PerLayerLyapunovScheduler
 
 parser = get_parser()
 config = parser.parse_args()
+if not hasattr(config, "snr_margin"):       config.snr_margin = 0.0
+if not hasattr(config, "snr_pred_window"):  config.snr_pred_window = 20
 LENGTH_CHOICES = [100, 300, 50, 150]
 
 rho = config.sam_rho
@@ -99,6 +101,7 @@ layer_states = {
 }
 
 criterion = nn.CrossEntropyLoss(reduction="mean")
+criterion_nored = nn.CrossEntropyLoss(reduction="none")  # for within-batch σ² only
 wd = config.l2_lambda if config.reg == "l2" else 0.0
 if config.optimizer == "adam":
     optimizer = optim.Adam(layer_groups, lr=config.lr, weight_decay=wd, betas=(0.9, config.beta2))
@@ -139,6 +142,22 @@ wandb.define_metric("gradient_noise",   hidden=False)
 wandb.define_metric("gradient_noise_mb",hidden=False)
 wandb.define_metric("true_grad_norm_sq",hidden=False)
 wandb.define_metric("task_lam_var",     hidden=False)
+# SNR metrics
+wandb.define_metric("snr_T", hidden=False)
+wandb.define_metric("snr_sigma2_hat", hidden=False)
+wandb.define_metric("mb_sigma2_hat", hidden=False)
+wandb.define_metric("mb_snr_T",      hidden=False)
+
+# tracker and series for plotting later
+snr_tracker = optimizers.GradSNR()
+snr_T_series = []          # list of (update_idx, T_t)
+snr_predictor = optimizers.SNRProgressPredictor(
+    margin=config.snr_margin, window=config.snr_pred_window
+)
+wandb.define_metric("snr_pred",        hidden=False)
+wandb.define_metric("snr_pred_conf",   hidden=True)
+wandb.define_metric("snr_T_mean",      hidden=True)
+wandb.define_metric("snr_T_thresh",    hidden=True)
 
 results = {
     config.activation: {
@@ -151,6 +170,7 @@ results = {
 }
 
 sharp_state  = misc.EMAState(alphas=(0.01, 0.05, 0.5))
+r_sharp_state = misc.EMAState(alphas=(0.01,0.05,0.5))
 lambda_state = misc.EMAState(alphas=(0.01, 0.05, 0.5))
 
 init_sigma_min = {}
@@ -164,8 +184,14 @@ for name, p in model.named_parameters():
         print(s0)
 print(print_val)
 
-task_lengths = [300, 50, 300, 300, 100, 300, 50, 150, 300, 100, 300, 50, 150, 300, 100, 300, 50, 150, 300, 100]
+task_lengths = [300, 50, 300, 300, 100] * 4
+ns = [1] + 9 * [0]
 for task in range(config.runs):
+    snr_sum = 0.0
+    k_snr_sum = 0.0
+    s_snr_sum = 0.0
+    ly_snr_sum = 0.0
+    ly_snr_2_sum = 0.0
     config.epochs = task_lengths[task] if config.random_length else config.epochs
     print(config.epochs)
 
@@ -205,8 +231,8 @@ for task in range(config.runs):
     else:
         # -x-x-x-x smooth non-stationary experiment -x-x-x-x
         train_dataset = optimizers.randomize_targets(train_dataset, config.ns)
-        # if task == config.runs:
-        #     train_dataset = optimizers.randomize_targets(train_dataset, 1.0)
+        # if task == 0:
+        #     train_dataset = optimizers.randomize_targets(train_dataset, 0.0)
         # -x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x
         loader = data.DataLoader(
             train_dataset, batch_size=config.batch_size, shuffle=True, num_workers=4
@@ -368,7 +394,7 @@ for task in range(config.runs):
                     state, scalars   = misc.update_stat(norm_lam, layer_states[layer], eff_lr)
 
                     if config.lr_schedule == "pl_lyapunov":
-                        lr_star = pl_scheduler.step(layer, eff_lr, scalars["tau"])
+                        lr_star = pl_scheduler.step(layer, eff_lr, scalars["tau"], config)
 
                     # (d) log everything with a nice prefix
                     wandb.log({
@@ -392,7 +418,10 @@ for task in range(config.runs):
                 effective_lr = optimizers.compute_adam_effective_lr(optimizer)
 
                 sharp_state,  sharp_log  = misc.update_stat(norm_sharpness,  sharp_state,  effective_lr)
-                lambda_state, lambda_log = misc.update_stat(lambda_min_norm, lambda_state, effective_lr) 
+                r_sharp_state,  r_sharp_log  = misc.update_stat(sharpness, sharp_state,  effective_lr)
+                lambda_state, lambda_log = misc.update_stat(lambda_min_norm, lambda_state, effective_lr)
+                ly_snr_sum += sharp_log["collapse_pred"]
+                ly_snr_2_sum += sharp_log["collapse_pred2"]
                 if ly_sched is not None:
                     lr_star, _ = ly_sched.step(effective_lr, lambda_log["tau"])
                     log_extra  = {"ly_lr_star": lr_star}
@@ -422,10 +451,62 @@ for task in range(config.runs):
                 if total_updates % config.log_interval == 0:
                     params = [p for p in model.parameters() if p.requires_grad]
                     grad_flat = torch.cat([p.grad.view(-1) for p in params])
-                    true_grad_norm_sq = (grad_flat.norm()**2).item()
-                    var_grad = grad_flat.var(unbiased=False).item()
-                    noise_power_full = (config.lr**2) * var_grad
-                    noise_power_mb = (config.lr**2) * var_grad / config.batch_size
+
+                    # 1) use the *current* grads to get ||g||^2 BEFORE any SNR math
+                    true_grad_norm_sq = float(grad_flat.pow(2).sum().item())
+
+                    # 2) temporal proxy SNR (unchanged)
+                    eta_eff = effective_lr if config.optimizer == "adam" else optimizer.param_groups[0]["lr"]
+                    batch_B = inputs.size(0)
+                    T_t, sigma2_hat = snr_tracker.update(grad_flat.detach(), eta_eff, int(batch_B))
+                    if T_t is not None:
+                        snr_T_series.append((total_updates, float(T_t)))
+
+                    # 3) within-minibatch σ² (Mark’s definition)
+                    sigma2_hat_mb = optimizers.grad_variance_within_batch(model, criterion_nored, inputs, labels)
+                    k_sigma2_hat_mb = sigma2_hat_mb + 0.5 * true_grad_norm_sq*sharpness
+                    s_sigma2_hat_mb = sigma2_hat_mb + 0.5 * true_grad_norm_sq*sharp_log["lam_var"]/sharp_log["lam_mean"]
+
+                    T_t_mb = eta_eff * (sigma2_hat_mb / max(1, batch_B)) / true_grad_norm_sq
+                    S_t_mb = eta_eff * (s_sigma2_hat_mb / max(1, batch_B)) / true_grad_norm_sq
+                    K_t_mb = eta_eff * (k_sigma2_hat_mb / max(1, batch_B)) / true_grad_norm_sq
+                    # --- SNR-based progress prediction (no scheduling) -----------------------
+                    pred, pred_real, meanT, thresh, conf = snr_predictor.update(T_t_mb, T_t)
+                    K_pred, K_pred_real, K_meanT, K_thresh, K_conf = snr_predictor.update(K_t_mb, T_t)
+                    S_pred, S_pred_real, S_meanT, S_thresh, S_conf = snr_predictor.update(S_t_mb, T_t)
+                    # Critical effective LR from Mark's 2nd trade-off
+                    alpha_crit_t = (batch_B * true_grad_norm_sq) / max(sigma2_hat_mb, 1e-12)
+                    alpha_crit_k = (batch_B * true_grad_norm_sq) / max(k_sigma2_hat_mb, 1e-12)
+                    alpha_crit_s = (batch_B * true_grad_norm_sq) / max(s_sigma2_hat_mb, 1e-12)
+
+                    # Prediction: 1 if we are above the critical LR
+                    snr_sum += pred_real 
+                    k_snr_sum += K_pred_real
+                    s_snr_sum += S_pred_real
+
+                    mark = {
+                        # "snr_T":            float(T_t) if T_t is not None else float("nan"),
+                        # "snr_sigma2_hat":   float(sigma2_hat) if sigma2_hat is not None else float("nan"),
+                        "mb_sigma2_hat":    float(sigma2_hat_mb),
+                        "mb_snr_T":         float(T_t_mb),
+                        "S_t_mb":           float(S_t_mb),
+                        "sharpness":        sharpness,
+                        "K_t_mb":           float(K_t_mb),
+
+                        "alpha_crit_t":     float(alpha_crit_t),
+                        "alpha_crit_k":     float(alpha_crit_k),
+                        "alpha_crit_s":     float(alpha_crit_s),
+                        # "pred_eff_gt_acrit": int(pred_above_alpha),
+
+                        "snr_pred":         int(pred) if pred is not None else -1,
+                        "snr_pred_real":    int(pred_real) if pred_real is not None else -1,
+                        "snr_pred_conf":    float(conf) if conf is not None else float("nan"),
+                        "snr_T_mean":       float(meanT) if meanT is not None else float("nan"),
+                        "snr_T_thresh":     float(thresh) if thresh is not None else float("nan"),
+                        "snr_K_real":       int(K_pred_real) if K_pred_real is not None else -1,
+                        "snr_S_real":       int(S_pred_real) if S_pred_real is not None else -1,
+                    }
+                    # ------------------------------------------------------------------------
                 optimizer.step()
                 
                 # betas scheduling
@@ -482,13 +563,14 @@ for task in range(config.runs):
                     # "preconditioned_sharpness": precond,
                     # "task_lam_var": avg_lam_var,
                     "lr": optimizer.param_groups[0]["lr"],
-                    "true_grad_norm_sq": var_grad,
+                    "true_grad_norm_sq": true_grad_norm_sq,
                     "effective_lr": effective_lr,
                     **init_sigma_min,
                     "max_singular": gg,
                     **sharp_log,                                   # sharpness stats
                     # **{f"lam_{k}": v for k, v in lambda_log.items()},
                     **log_extra,               # only when ly_sched is active
+                    **mark,
                     # "gradient_noise": noise_power_full,
                     # "gradient_noise_mb": noise_power_mb,
                     # "beta2": optimizer.param_groups[0]["betas"][1],
@@ -543,6 +625,11 @@ for task in range(config.runs):
             "average_update_norm": aun,
             "effective_rank": effective_rank,
             "task_acc": this_task_acc / (config.epochs * len(loader)),
+            "snr_pct": 1 - (snr_sum / (config.epochs * len(loader) / config.log_interval)),
+            "k_snr_pct": 1 - (k_snr_sum / (config.epochs * len(loader) / config.log_interval)),
+            "s_snr_pct": 1 - (s_snr_sum / (config.epochs * len(loader) / config.log_interval)),
+            "ly_snr_pct": 1 - (ly_snr_sum / (config.epochs * len(loader) / config.log_interval)),
+            "ly_snr_pct2": 1 - (ly_snr_2_sum / (config.epochs * len(loader) / config.log_interval))
         }
     )
     res = results[config.activation]

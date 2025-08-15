@@ -346,6 +346,9 @@ def estimate_hessian_min_eig(model, loss, params, iters=100):
     lam = v.dot(Hv).item()                   # this is  |λ_min|
     return -lam                              # flip sign → λ_min (<0)
 
+import math
+from typing import Optional
+
 def compute_adam_effective_lr(optimizer: torch.optim.Adam,
                               eps: float = None
                               ) -> float:
@@ -417,25 +420,85 @@ class CVSharpnessController(_optim.Optimizer):
         return self.opt.step(closure)
 
 
-def per_layer_effective_lr(model: torch.nn.Module,
-                           optimizer: torch.optim.Adam) -> dict[str, float]:
-    eps = optimizer.param_groups[0].get('eps', 1e-8)
-    base_lr = optimizer.param_groups[0]['lr']
+from typing import Optional
 
-    layer_lrs = {}
-    for name, p in model.named_parameters():
-        if not p.requires_grad:           # frozen params
-            continue
-        st = optimizer.state[p]
-        if 'exp_avg_sq' not in st:        # first few steps
-            continue
-        v_rms   = st['exp_avg_sq'].mean().sqrt().item()
-        eff_lr  = base_lr / (v_rms + eps)
-        layer   = name.split('.')[0]      # "fc1.weight" → "fc1"
-        layer_lrs.setdefault(layer, []).append(eff_lr)
+def per_layer_effective_lr(
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    *,
+    include_ndim1: bool = False,   # False => skip 1D params (bias / BN)
+    eps: Optional[float] = None    # override group eps if desired
+) -> dict[str, float]:
+    """
+    Per-layer 'effective LR' for Adam/AdamW:
+        eff(p) = lr_group / ( sqrt(mean(v_hat)) + eps_group )
 
-    # average within each layer
-    return {k: sum(v)/len(v) for k, v in layer_lrs.items()}
+    - Bias-corrects v (uses v_hat) and respects AMSGrad.
+    - Aggregates by top-level module (e.g., 'fc1' from 'fc1.weight').
+    - Skips non-trainable and, by default, 1D tensors.
+    - Avoids tensor equality by matching params via id(p).
+    """
+    # Map parameter identity → name for aggregation
+    id2name = {id(p): name for name, p in model.named_parameters()}
+
+    layer_sums: dict[str, float] = {}
+    layer_counts: dict[str, int] = {}
+
+    for group in optimizer.param_groups:
+        base_lr = float(group.get("lr", 0.0))
+        if base_lr == 0.0:
+            continue
+
+        group_eps   = float(group.get("eps", 1e-8) if eps is None else eps)
+        beta2       = float(group.get("betas", (0.9, 0.999))[1])
+        use_amsgrad = bool(group.get("amsgrad", False))
+
+        # Identity set to avoid tensor equality comparisons
+        group_param_ids = {id(q) for q in group.get("params", [])}
+
+        for q in group.get("params", []):
+            if id(q) not in group_param_ids:   # (redundant, but explicit)
+                continue
+            if not getattr(q, "requires_grad", False):
+                continue
+            if (not include_ndim1) and (q.ndim <= 1):
+                continue
+
+            st = optimizer.state.get(q, None)
+            if not st:
+                continue
+
+            # Choose second-moment buffer (AMSGrad if present)
+            v = st.get("max_exp_avg_sq") if (use_amsgrad and "max_exp_avg_sq" in st) else st.get("exp_avg_sq")
+            if v is None or v.numel() == 0:
+                continue
+
+            step = int(st.get("step", 0))
+            if step <= 0:
+                denom = group_eps
+            else:
+                bc2 = 1.0 - (beta2 ** step)
+                if bc2 <= 0.0:
+                    continue
+                v_hat_mean = (v.float().mean().item() / bc2)
+                denom = math.sqrt(max(v_hat_mean, 0.0)) + group_eps
+
+            if denom <= 0.0 or not math.isfinite(denom):
+                continue
+
+            eff = base_lr / denom
+
+            # Aggregate by layer name
+            name = id2name.get(id(q), None)
+            if name is None:
+                continue
+            layer = name.split('.', 1)[0] if '.' in name else name
+
+            layer_sums[layer]   = layer_sums.get(layer, 0.0) + eff
+            layer_counts[layer] = layer_counts.get(layer, 0)   + 1
+
+    return {k: (layer_sums[k] / layer_counts[k]) for k in layer_sums}
+
 
 class PerLayerLyapunovScheduler:
     """
@@ -455,7 +518,7 @@ class PerLayerLyapunovScheduler:
             if lyr is not None:
                 self.layer2groups.setdefault(lyr, []).append(i)
 
-    def step(self, layer: str, eff_lr: float, tau: float) -> float:
+    def step(self, layer: str, eff_lr: float, tau: float, config) -> float:
         """
         Call once per layer; mutates that layer’s LR *in place*.
         Returns lr_star so you can log it.
@@ -468,7 +531,7 @@ class PerLayerLyapunovScheduler:
         lr_star = tau                         # theoretical upper-bound
         if eff_lr > 0.12 and eff_lr > self.safety * lr_star:    # too aggressive ⇒ cool
             factor = self.cool
-        # elif eff_lr < 0.5 * self.safety * lr_star:   # too timid ⇒ warm
+        # elif eff_lr < 0.04 * self.safety * lr_star:   # too timid ⇒ warm
         #     factor = self.warm
         else:
             return lr_star                    # inside band → do nothing
@@ -478,3 +541,102 @@ class PerLayerLyapunovScheduler:
             self.opt.param_groups[gi]['lr'] *= factor
         return lr_star
         
+# ---- Gradient SNR tracker (Mark's 2nd trade-off proxy) ------------------
+class GradSNR:
+    """
+    Maintains a one-step estimate of data-gradient variance:
+        sigma^2 ≈ 0.5 * ||g_t - g_{t-1}||^2
+    and returns the trade-off ratio
+        T_t = ||g_t||^2 / (eta_eff * sigma^2 / B)
+    No state beyond previous gradient; no scheduling.
+    """
+    def __init__(self):
+        self.prev = None
+
+    @torch.no_grad()
+    def update(self,
+               grad_flat: torch.Tensor,
+               eta_eff: float,
+               batch_B: int) -> tuple[float | None, float | None]:
+        if grad_flat is None:
+            return None, None
+        if self.prev is None or self.prev.numel() != grad_flat.numel():
+            self.prev = grad_flat.detach().clone()
+            return None, None
+
+        diff = (grad_flat - self.prev)
+        sigma2_hat = 0.5 * float(diff.pow(2).sum().item())
+
+        T_t = None
+        if sigma2_hat > 0.0 and eta_eff > 0.0:
+            gnorm2 = float(grad_flat.pow(2).sum().item())
+            T_t = (eta_eff * (sigma2_hat / max(1, batch_B))) / gnorm2
+
+        self.prev = grad_flat.detach().clone()
+        return T_t, sigma2_hat
+
+def grad_variance_within_batch(model, loss_fn, inputs, targets):
+    """
+    σ² := (1/B) * Σ_i || g_i - ḡ ||²
+    where g_i = ∇_θ ℓ(f(x_i), y_i).
+    Torch-only (no functorch). Safe for occasional use at log intervals.
+    """
+    device = inputs.device
+    params = [p for p in model.parameters() if p.requires_grad]
+
+    # Forward once, get per-sample losses (no reduction)
+    model.zero_grad(set_to_none=True)
+    outputs = model(inputs)
+    per_sample_losses = loss_fn(outputs, targets)  # ensure loss_fn has reduction='none'
+    if per_sample_losses.ndim > 1:
+        per_sample_losses = per_sample_losses.mean(dim=tuple(range(1, per_sample_losses.ndim)))
+
+    B = int(per_sample_losses.shape[0])
+
+    grads = []
+    # Collect per-sample grads (reuse graph; retain_graph=True except last)
+    for i in range(B):
+        loss_i = per_sample_losses[i]
+        retain = (i < B - 1)
+        gi = torch.autograd.grad(loss_i, params, retain_graph=retain, allow_unused=False)
+        gi_flat = torch.cat([g.contiguous().view(-1) for g in gi])
+        grads.append(gi_flat.detach())
+
+    G = torch.stack(grads, dim=0)          # (B, P)
+    g_bar = G.mean(dim=0)
+    sigma2 = ((G - g_bar)**2).sum(dim=1).mean().item()   # scalar
+
+    return sigma2
+
+import math
+
+class SNRProgressPredictor:
+    """
+    Rolling predictor: expects progress if mean T over a short window
+    stays above (1 + margin). Uses T_mb (within-batch) if present,
+    else falls back to temporal proxy T_t.
+    """
+    def __init__(self, margin: float = 0.0, window: int = 20):
+        self.delta   = float(margin)
+        self.window  = int(window)
+        self.win     = deque(maxlen=self.window)
+
+    def update(self,  T_mb: float | None, T_proxy: float | None):
+        # pick signal: prefer within-batch T_mb
+        t = T_mb if (T_mb is not None and not math.isnan(T_mb)) else (
+            T_proxy if (T_proxy is not None and not math.isnan(T_proxy)) else None
+        )
+        if t is None:
+            return None, None, None, None  # pred, meanT, thresh, conf
+
+        self.win.append(float(t))
+        meanT = sum(self.win) / len(self.win)
+        thresh = 1.0 + self.delta
+        pred = 1 if meanT >= thresh else 0
+        pred_real = 1 if t >= thresh else 0
+
+        # very light confidence: gap from threshold × fill ratio (clipped)
+        gap = abs(meanT - thresh)
+        conf = min(0.99, gap / 0.5) * (len(self.win) / self.win.maxlen)
+
+        return pred, pred_real, meanT, thresh, conf

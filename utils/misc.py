@@ -33,6 +33,7 @@ class EMAState:
     mu:  List[float] = field(default_factory=list)
     var2: List[float] = field(default_factory=list)
     queue: Deque[float] = field(default_factory=lambda: deque(maxlen=30))
+    lam_var_queue: Deque[float] = field(default_factory=lambda: deque(maxlen=30))
     ema_variation: float | None = None
 
     def __post_init__(self):
@@ -65,6 +66,11 @@ def update_stat(x: float,
     lam_var  = (x - lam_mean)**2                     # per-step squared deviation
     lam_cv   = lam_var / (lam_mean + 1e-12)
 
+    state.lam_var_queue.append(float(lam_var))
+    lam_var_variance = np.var(state.lam_var_queue) if len(state.lam_var_queue) > 1 else 0.0
+    lam_var_mean = sum(state.lam_var_queue) / len(state.lam_var_queue)
+    lam_var_cv = lam_var_variance / (lam_var_mean + 1e-12)
+
     # --- 3. variation metric & its EMA ------------------------------------------
     variation = x**2 / lam_mean if lam_mean > 0 else 0.0
     if state.ema_variation is None:
@@ -86,6 +92,8 @@ def update_stat(x: float,
         "lam_var":             lam_var,
         "lam_cv":              lam_cv,
         "ema_variation_inv":   state.ema_variation,
+        "lam_var_cv":          lam_var_cv,
+        "lam_var_mean":        lam_var_mean,
         # variances with your original 1/(2·var) transform:
         "vol_1":               vols[0],
         "vol_2":               vols[1],
