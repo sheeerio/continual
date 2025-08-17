@@ -191,7 +191,9 @@ for task in range(config.runs):
     k_snr_sum = 0.0
     s_snr_sum = 0.0
     ly_snr_sum = 0.0
+    ly_union_sum = 0.0
     ly_snr_2_sum = 0.0
+    eff_acrit_union_sum = 0.0
     config.epochs = task_lengths[task] if config.random_length else config.epochs
     print(config.epochs)
 
@@ -382,30 +384,56 @@ for task in range(config.runs):
 
             if total_updates % config.log_interval == 0:
                 layer_eff_lrs = optimizers.per_layer_effective_lr(model, optimizer)
+
+                layer_sigma2_mb = optimizers.grad_variance_within_batch_by_layer(
+                    model, criterion_nored, inputs, labels, layer_map
+                )
+
+                # union across layers for collapse_pred (NO pred2)
+                union_pred_step = 0
+                union_eff_gt_acrit_step = 0  
+
                 for layer, params in layer_map.items():
-                    # (a) top eigen-value of this layer’s Hessian block
                     lam = optimizers.estimate_hessian_topk(model, loss, params, k=1)[0]
-
-                    # (b) normalize the sharpness exactly like you do globally
                     norm_lam = optimizers.get_norm_sharpness(optimizer, lam, config)
-
-                    # (c) update EMA statistics and grab scalars
                     eff_lr = layer_eff_lrs.get(layer, optimizer.param_groups[0]["lr"])
-                    state, scalars   = misc.update_stat(norm_lam, layer_states[layer], eff_lr)
+                    state, scalars = misc.update_stat(norm_lam, layer_states[layer], eff_lr)
+
+                    # strictly use collapse_pred for the union
+                    layer_pred = int(scalars["collapse_pred2"])
+                    union_pred_step = max(union_pred_step, layer_pred)
+
+                    # ---- per-layer alpha_crit_s (unchanged) ----
+                    gi = torch.autograd.grad(loss, params, retain_graph=True, allow_unused=False)
+                    g_layer_sq = float(torch.cat([g.contiguous().view(-1) for g in gi]).pow(2).sum().item())
+
+                    lam_mean = float(scalars.get("lam_mean", 0.0)) or 1e-12
+                    lam_var  = float(scalars.get("lam_var", 0.0))
+                    sigma2_l = float(layer_sigma2_mb.get(layer, 0.0))
+                    s_sigma2_l = sigma2_l + 0.5 * g_layer_sq * (lam_var / lam_mean)
+
+                    B = int(inputs.size(0))
+                    alpha_crit_s_layer = (B * g_layer_sq) / max(s_sigma2_l, 1e-12)
+                    eff_gt_acrit = int(eff_lr > alpha_crit_s_layer)
+                    union_eff_gt_acrit_step = max(union_eff_gt_acrit_step, eff_gt_acrit)
+
+                    wandb.log({
+                        f"{layer}/sharp"       : norm_lam,
+                        f"{layer}/mu"          : scalars["lam_mean"],
+                        f"{layer}/tau"         : scalars["tau"],
+                        f"{layer}/cv"          : scalars["lam_cv"],
+                        f"{layer}/eff_lr"      : eff_lr,
+                        f"{layer}/predict"     : layer_pred,
+                        f"{layer}/alpha_crit_s": float(alpha_crit_s_layer),
+                        "reg"                  : reg
+                    })
 
                     if config.lr_schedule == "pl_lyapunov":
                         lr_star = pl_scheduler.step(layer, eff_lr, scalars["tau"], config)
 
-                    # (d) log everything with a nice prefix
-                    wandb.log({
-                        f"{layer}/sharp" : norm_lam,
-                        f"{layer}/mu"    : scalars["lam_mean"],
-                        f"{layer}/tau"   : scalars["tau"],
-                        f"{layer}/cv"    : scalars["lam_cv"],
-                        f"{layer}/eff_lr": eff_lr,
-                        f"{layer}/predict": scalars["collapse_pred"],
-                        "reg":              reg
-                    })
+                # accumulate union across layers for this log step
+                ly_union_sum += union_pred_step
+                eff_acrit_union_sum += union_eff_gt_acrit_step
 
                 eigs = optimizers.estimate_hessian_topk(model, loss, params, k=1)
                 sharpness = eigs[0]
@@ -465,7 +493,7 @@ for task in range(config.runs):
                     # 3) within-minibatch σ² (Mark’s definition)
                     sigma2_hat_mb = optimizers.grad_variance_within_batch(model, criterion_nored, inputs, labels)
                     k_sigma2_hat_mb = sigma2_hat_mb + 0.5 * true_grad_norm_sq*sharpness
-                    s_sigma2_hat_mb = sigma2_hat_mb + 0.5 * true_grad_norm_sq*sharp_log["lam_var"]/sharp_log["lam_mean"]
+                    s_sigma2_hat_mb = sigma2_hat_mb + 10.0 * true_grad_norm_sq*r_sharp_log["lam_cv"]
 
                     T_t_mb = eta_eff * (sigma2_hat_mb / max(1, batch_B)) / true_grad_norm_sq
                     S_t_mb = eta_eff * (s_sigma2_hat_mb / max(1, batch_B)) / true_grad_norm_sq
@@ -617,6 +645,7 @@ for task in range(config.runs):
     cut = s.sum() * 0.99
     j = (torch.cumsum(s, 0) >= cut).nonzero()[0].item() + 1
     effective_rank = -j / float(h.shape[1])
+    steps = (config.epochs * len(loader) / config.log_interval)
     run.log(
         {
             "J": J,
@@ -625,11 +654,13 @@ for task in range(config.runs):
             "average_update_norm": aun,
             "effective_rank": effective_rank,
             "task_acc": this_task_acc / (config.epochs * len(loader)),
-            "snr_pct": 1 - (snr_sum / (config.epochs * len(loader) / config.log_interval)),
-            "k_snr_pct": 1 - (k_snr_sum / (config.epochs * len(loader) / config.log_interval)),
-            "s_snr_pct": 1 - (s_snr_sum / (config.epochs * len(loader) / config.log_interval)),
-            "ly_snr_pct": 1 - (ly_snr_sum / (config.epochs * len(loader) / config.log_interval)),
-            "ly_snr_pct2": 1 - (ly_snr_2_sum / (config.epochs * len(loader) / config.log_interval))
+            "snr_pct": 1 - (snr_sum / steps),
+            "k_snr_pct": 1 - (k_snr_sum / steps),
+            "s_snr_pct": 1 - (s_snr_sum / steps),
+            "ly_snr_pct": 1 - (ly_snr_sum / steps),
+            "ly_snr_pct2": 1 - (ly_snr_2_sum / steps),
+            "ly_snr_pct_union": 1 - (ly_union_sum / steps),
+            "eff_safe_pct_union": 1 - (eff_acrit_union_sum / steps),
         }
     )
     res = results[config.activation]

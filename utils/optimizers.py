@@ -640,3 +640,57 @@ class SNRProgressPredictor:
         conf = min(0.99, gap / 0.5) * (len(self.win) / self.win.maxlen)
 
         return pred, pred_real, meanT, thresh, conf
+
+def grad_variance_within_batch_by_layer(model, loss_fn, inputs, targets, layer_map):
+    """
+    Per-layer within-minibatch gradient variance.
+      σ²_layer := (1/B) * Σ_i || g_i^(layer) - ḡ^(layer) ||²
+
+    Returns:
+      dict: layer -> sigma2 (float)
+    """
+    device = inputs.device
+    params_all = [p for p in model.parameters() if p.requires_grad]
+
+    # Forward once, get per-sample losses (no reduction)
+    model.zero_grad(set_to_none=True)
+    outputs = model(inputs)
+    per_sample_losses = loss_fn(outputs, targets)
+    if per_sample_losses.ndim > 1:
+        per_sample_losses = per_sample_losses.mean(dim=tuple(range(1, per_sample_losses.ndim)))
+
+    B = int(per_sample_losses.shape[0])
+
+    # Build a stable order per layer
+    layer_param_lists = {layer: [p for p in plist if p.requires_grad]
+                         for layer, plist in layer_map.items()}
+
+    # Collect per-sample grads, split by layer
+    layer_grads = {layer: [] for layer in layer_param_lists}
+    for i in range(B):
+        loss_i = per_sample_losses[i]
+        retain = (i < B - 1)
+        gi = torch.autograd.grad(loss_i, params_all, retain_graph=retain, allow_unused=False)
+        # map back to layers
+        idx = 0
+        # rebuild gi per parameter by iterating the same order as params_all
+        name2grad = {}
+        for p in params_all:
+            g = gi[idx]
+            name2grad[id(p)] = g
+            idx += 1
+        for layer, plist in layer_param_lists.items():
+            g_l = torch.cat([name2grad[id(p)].contiguous().view(-1) for p in plist], dim=0)
+            layer_grads[layer].append(g_l.detach())
+
+    sigma2_by_layer = {}
+    for layer, Glist in layer_grads.items():
+        if len(Glist) == 0:
+            sigma2_by_layer[layer] = 0.0
+            continue
+        G = torch.stack(Glist, dim=0)          # (B, P_l)
+        g_bar = G.mean(dim=0)
+        sigma2 = ((G - g_bar) ** 2).sum(dim=1).mean().item()
+        sigma2_by_layer[layer] = float(sigma2)
+
+    return sigma2_by_layer
