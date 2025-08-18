@@ -188,12 +188,36 @@ task_lengths = [300, 50, 300, 300, 100] * 4
 ns = [1] + 9 * [0]
 for task in range(config.runs):
     snr_sum = 0.0
-    k_snr_sum = 0.0
-    s_snr_sum = 0.0
+    # k_snr_sum = 0.0
+    # s_snr_sum = 0.0
+    # sharp**2 / mean for both r_sharp_log and sharp_log
+    k_ss_sum1 = 0.0
+    k_ss_sum10 = 0.0
+    k_rs_sum1 = 0.0
+    k_rs_sum10 = 0.0
+    s_scv_sum10 = 0.0
+    s_svar_sum10 = 0.0
+    s_rcv_sum10 = 0.0
+    s_rvar_sum10 = 0.0
+    s_scv_sum1 = 0.0
+    s_sqm_sum1 = 0.0
+    s_sqm_sum10 = 0.0
+    s_svar_sum1 = 0.0
+    s_rcv_sum1 = 0.0
+    s_rvar_sum1 = 0.0
+    s_rsqm_sum1 = 0.0
+    s_rsqm_sum10 = 0.0
     ly_snr_sum = 0.0
     ly_union_sum = 0.0
     ly_snr_2_sum = 0.0
-    eff_acrit_union_sum = 0.0
+    eff_acrit_scv1_union_sum = 0.0
+    eff_acrit_ss1_union_sum = 0.0
+    eff_acrit_svar1_union_sum = 0.0
+    eff_acrit_ssqm1_union_sum = 0.0
+    eff_acrit_scv10_union_sum = 0.0
+    eff_acrit_ss10_union_sum = 0.0
+    eff_acrit_svar10_union_sum = 0.0
+    eff_acrit_ssqm10_union_sum = 0.0
     config.epochs = task_lengths[task] if config.random_length else config.epochs
     print(config.epochs)
 
@@ -391,7 +415,14 @@ for task in range(config.runs):
 
                 # union across layers for collapse_pred (NO pred2)
                 union_pred_step = 0
-                union_eff_gt_acrit_step = 0  
+                union_eff_gt_acrit_step_scv1 = 0
+                union_eff_gt_acrit_step_ss1 = 0
+                union_eff_gt_acrit_step_svar1 = 0
+                union_eff_gt_acrit_step_scv10 = 0
+                union_eff_gt_acrit_step_ss10 = 0
+                union_eff_gt_acrit_step_svar10 = 0
+                union_eff_gt_acrit_step_sqm1 = 0
+                union_eff_gt_acrit_step_sqm10 = 0
 
                 for layer, params in layer_map.items():
                     lam = optimizers.estimate_hessian_topk(model, loss, params, k=1)[0]
@@ -407,15 +438,43 @@ for task in range(config.runs):
                     gi = torch.autograd.grad(loss, params, retain_graph=True, allow_unused=False)
                     g_layer_sq = float(torch.cat([g.contiguous().view(-1) for g in gi]).pow(2).sum().item())
 
-                    lam_mean = float(scalars.get("lam_mean", 0.0)) or 1e-12
-                    lam_var  = float(scalars.get("lam_var", 0.0))
                     sigma2_l = float(layer_sigma2_mb.get(layer, 0.0))
-                    s_sigma2_l = sigma2_l + 0.5 * g_layer_sq * (lam_var / lam_mean)
+                    s_scv_sigma2_l1 = sigma2_l + 1.0 * g_layer_sq * scalars["lam_cv"]
+                    s_ss_sigma2_l1 = sigma2_l + 1.0 * g_layer_sq * norm_lam
+                    s_svar_sigma2_l1 = sigma2_l + 1.0 * g_layer_sq * scalars["lam_var"]
+                    s_sqm_sigma2_l1 = sigma2_l + 75.0 * g_layer_sq * scalars["sq_mean"]
+                    s_scv_sigma2_l10 = sigma2_l + 50.0 * g_layer_sq * scalars["lam_cv"]
+                    s_ss_sigma2_l10 = sigma2_l + 50.0 * g_layer_sq * norm_lam
+                    s_svar_sigma2_l10 = sigma2_l + 50.0 * g_layer_sq * scalars["lam_var"]
+                    s_sqm_sigma2_l10 = sigma2_l + 50.0 * g_layer_sq * scalars["sq_mean"]
 
                     B = int(inputs.size(0))
-                    alpha_crit_s_layer = (B * g_layer_sq) / max(s_sigma2_l, 1e-12)
-                    eff_gt_acrit = int(eff_lr > alpha_crit_s_layer)
-                    union_eff_gt_acrit_step = max(union_eff_gt_acrit_step, eff_gt_acrit)
+                    alpha_crit_scv_layer1 = (B * g_layer_sq) / max(s_scv_sigma2_l1, 1e-12)
+                    alpha_crit_ss_layer1 = (B * g_layer_sq) / max(s_ss_sigma2_l1, 1e-12)
+                    alpha_crit_svar_layer1 = (B * g_layer_sq) / max(s_svar_sigma2_l1, 1e-12)
+                    alpha_crit_sqm_layer1 = (B * g_layer_sq) / max(s_sqm_sigma2_l1, 1e-12)
+                    alpha_crit_scv_layer10 = (B * g_layer_sq) / max(s_scv_sigma2_l10, 1e-12)
+                    alpha_crit_ss_layer10 = (B * g_layer_sq) / max(s_ss_sigma2_l10, 1e-12)
+                    alpha_crit_svar_layer10 = (B * g_layer_sq) / max(s_svar_sigma2_l10, 1e-12)
+                    alpha_crit_sqm_layer10 = (B * g_layer_sq) / max(s_sqm_sigma2_l10, 1e-12)
+                    eff_gt_acrit_scv1 = int(eff_lr > alpha_crit_scv_layer1)
+                    eff_gt_acrit_ss1 = int(eff_lr > alpha_crit_ss_layer1)
+                    eff_gt_acrit_svar1 = int(eff_lr > alpha_crit_svar_layer1)
+                    eff_gt_acrit_sqm1 = int(eff_lr > alpha_crit_sqm_layer1)
+                    eff_gt_acrit_scv10 = int(eff_lr > alpha_crit_scv_layer10)
+                    eff_gt_acrit_ss10 = int(eff_lr > alpha_crit_ss_layer10)
+                    eff_gt_acrit_svar10 = int(eff_lr > alpha_crit_svar_layer10)
+                    eff_gt_acrit_sqm10 = int(eff_lr > alpha_crit_sqm_layer10)
+
+                    union_eff_gt_acrit_step_scv1 = max(union_eff_gt_acrit_step_scv1, eff_gt_acrit_scv1)
+                    union_eff_gt_acrit_step_ss1 = max(union_eff_gt_acrit_step_ss1, eff_gt_acrit_ss1)
+                    union_eff_gt_acrit_step_svar1 = max(union_eff_gt_acrit_step_svar1, eff_gt_acrit_svar1)
+                    union_eff_gt_acrit_step_sqm1 = max(union_eff_gt_acrit_step_sqm1, eff_gt_acrit_sqm1)
+                    union_eff_gt_acrit_step_scv10 = max(union_eff_gt_acrit_step_scv10, eff_gt_acrit_scv10)
+                    union_eff_gt_acrit_step_ss10 = max(union_eff_gt_acrit_step_ss10, eff_gt_acrit_ss10)
+                    union_eff_gt_acrit_step_svar10 = max(union_eff_gt_acrit_step_svar10, eff_gt_acrit_svar10)
+                    union_eff_gt_acrit_step_sqm10 = max(union_eff_gt_acrit_step_sqm10, eff_gt_acrit_sqm10)
+
 
                     wandb.log({
                         f"{layer}/sharp"       : norm_lam,
@@ -424,7 +483,15 @@ for task in range(config.runs):
                         f"{layer}/cv"          : scalars["lam_cv"],
                         f"{layer}/eff_lr"      : eff_lr,
                         f"{layer}/predict"     : layer_pred,
-                        f"{layer}/alpha_crit_s": float(alpha_crit_s_layer),
+                        # f"{layer}/alpha_crit_s": float(alpha_crit_s_layer),
+                        f"{layer}/alpha_crit_scv1": float(alpha_crit_scv_layer1),
+                        f"{layer}/alpha_crit_ss1": float(alpha_crit_ss_layer1),
+                        f"{layer}/alpha_crit_svar1": float(alpha_crit_svar_layer1),
+                        f"{layer}/alpha_crit_scv10": float(alpha_crit_scv_layer10),
+                        f"{layer}/alpha_crit_ss10": float(alpha_crit_ss_layer10),
+                        f"{layer}/alpha_crit_svar10": float(alpha_crit_svar_layer10),
+                        f"{layer}/alpha_crit_sqm1": float(alpha_crit_sqm_layer1),
+                        f"{layer}/alpha_crit_sqm10": float(alpha_crit_sqm_layer10),
                         "reg"                  : reg
                     })
 
@@ -433,7 +500,14 @@ for task in range(config.runs):
 
                 # accumulate union across layers for this log step
                 ly_union_sum += union_pred_step
-                eff_acrit_union_sum += union_eff_gt_acrit_step
+                eff_acrit_scv1_union_sum += union_eff_gt_acrit_step_scv1
+                eff_acrit_ss1_union_sum += union_eff_gt_acrit_step_ss1
+                eff_acrit_svar1_union_sum += union_eff_gt_acrit_step_svar1
+                eff_acrit_ssqm1_union_sum += union_eff_gt_acrit_step_sqm1
+                eff_acrit_scv10_union_sum += union_eff_gt_acrit_step_scv10
+                eff_acrit_ss10_union_sum += union_eff_gt_acrit_step_ss10
+                eff_acrit_svar10_union_sum += union_eff_gt_acrit_step_svar10
+                eff_acrit_ssqm10_union_sum += union_eff_gt_acrit_step_sqm10
 
                 eigs = optimizers.estimate_hessian_topk(model, loss, params, k=1)
                 sharpness = eigs[0]
@@ -446,7 +520,7 @@ for task in range(config.runs):
                 effective_lr = optimizers.compute_adam_effective_lr(optimizer)
 
                 sharp_state,  sharp_log  = misc.update_stat(norm_sharpness,  sharp_state,  effective_lr)
-                r_sharp_state,  r_sharp_log  = misc.update_stat(sharpness, sharp_state,  effective_lr)
+                r_sharp_state,  r_sharp_log  = misc.update_stat(sharpness, r_sharp_state,  effective_lr)
                 lambda_state, lambda_log = misc.update_stat(lambda_min_norm, lambda_state, effective_lr)
                 ly_snr_sum += sharp_log["collapse_pred"]
                 ly_snr_2_sum += sharp_log["collapse_pred2"]
@@ -492,47 +566,152 @@ for task in range(config.runs):
 
                     # 3) within-minibatch σ² (Mark’s definition)
                     sigma2_hat_mb = optimizers.grad_variance_within_batch(model, criterion_nored, inputs, labels)
-                    k_sigma2_hat_mb = sigma2_hat_mb + 0.5 * true_grad_norm_sq*sharpness
-                    s_sigma2_hat_mb = sigma2_hat_mb + 10.0 * true_grad_norm_sq*r_sharp_log["lam_cv"]
+                    k_rs_sigma2_hat_mb1 = sigma2_hat_mb + 1. * true_grad_norm_sq*sharpness
+                    k_ss_sigma2_hat_mb1 = sigma2_hat_mb + 1. * true_grad_norm_sq*norm_sharpness
+                    k_rs_sigma2_hat_mb10 = sigma2_hat_mb + 10. * true_grad_norm_sq*sharpness
+                    k_ss_sigma2_hat_mb10 = sigma2_hat_mb + 10. * true_grad_norm_sq*norm_sharpness
+                    s_scv_sigma2_hat_mb10 = sigma2_hat_mb + 50.0 * true_grad_norm_sq*sharp_log["lam_cv"]
+                    s_svar_sigma2_hat_mb10 = sigma2_hat_mb + 50.0 * true_grad_norm_sq*sharp_log["lam_var"]
+                    s_rcv_sigma2_hat_mb10 = sigma2_hat_mb + 50.0 * true_grad_norm_sq*r_sharp_log["lam_cv"]
+                    s_rvar_sigma2_hat_mb10 = sigma2_hat_mb + 50.0 * true_grad_norm_sq*r_sharp_log["lam_var"] # decent contender w/ a smaller coeff
+                    s_scv_sigma2_hat_mb1 = sigma2_hat_mb + 1.0 * true_grad_norm_sq*sharp_log["lam_cv"]
+                    s_svar_sigma2_hat_mb1 = sigma2_hat_mb + 1.0 * true_grad_norm_sq*sharp_log["lam_var"]
+                    s_rcv_sigma2_hat_mb1 = sigma2_hat_mb + 1.0 * true_grad_norm_sq*r_sharp_log["lam_cv"]
+                    s_rvar_sigma2_hat_mb1 = sigma2_hat_mb + 1.0 * true_grad_norm_sq*r_sharp_log["lam_var"]
+                    s_ssqm_sigma2_hat_mb10 = sigma2_hat_mb + 50.0 * true_grad_norm_sq*sharp_log["sq_mean"]
+                    s_rsqm_sigma2_hat_mb10 = sigma2_hat_mb + 50.0 * true_grad_norm_sq*r_sharp_log["sq_mean"]
+                    s_ssqm_sigma2_hat_mb1 = sigma2_hat_mb + 75.0 * true_grad_norm_sq*sharp_log["sq_mean"]
+                    s_rsqm_sigma2_hat_mb1 = sigma2_hat_mb + 1.0 * true_grad_norm_sq*r_sharp_log["sq_mean"]
+
 
                     T_t_mb = eta_eff * (sigma2_hat_mb / max(1, batch_B)) / true_grad_norm_sq
-                    S_t_mb = eta_eff * (s_sigma2_hat_mb / max(1, batch_B)) / true_grad_norm_sq
-                    K_t_mb = eta_eff * (k_sigma2_hat_mb / max(1, batch_B)) / true_grad_norm_sq
+                    # S_t_mb = eta_eff * (s_sigma2_hat_mb / max(1, batch_B)) / true_grad_norm_sq
+                    # K_t_mb = eta_eff * (k_sigma2_hat_mb / max(1, batch_B)) / true_grad_norm_sq
+                    K_rs_t_mb1 = eta_eff * (k_rs_sigma2_hat_mb1 / max(1, batch_B)) / true_grad_norm_sq
+                    K_ss_t_mb1 = eta_eff * (k_ss_sigma2_hat_mb1 / max(1, batch_B)) / true_grad_norm_sq
+                    K_rs_t_mb10 = eta_eff * (k_rs_sigma2_hat_mb10 / max(1, batch_B)) / true_grad_norm_sq
+                    K_ss_t_mb10 = eta_eff * (k_ss_sigma2_hat_mb10 / max(1, batch_B)) / true_grad_norm_sq
+
+                    S_scv_t_mb10 = eta_eff * (s_scv_sigma2_hat_mb10 / max(1, batch_B)) / true_grad_norm_sq
+                    S_svar_t_mb10 = eta_eff * (s_svar_sigma2_hat_mb10 / max(1, batch_B)) / true_grad_norm_sq
+                    S_rcv_t_mb10 = eta_eff * (s_rcv_sigma2_hat_mb10 / max(1, batch_B)) / true_grad_norm_sq
+                    S_rvar_t_mb10 = eta_eff * (s_rvar_sigma2_hat_mb10 / max(1, batch_B)) / true_grad_norm_sq
+
+                    S_scv_t_mb1 = eta_eff * (s_scv_sigma2_hat_mb1 / max(1, batch_B)) / true_grad_norm_sq
+                    S_svar_t_mb1 = eta_eff * (s_svar_sigma2_hat_mb1 / max(1, batch_B)) / true_grad_norm_sq
+                    S_rcv_t_mb1 = eta_eff * (s_rcv_sigma2_hat_mb1 / max(1, batch_B)) / true_grad_norm_sq
+                    S_rvar_t_mb1 = eta_eff * (s_rvar_sigma2_hat_mb1 / max(1, batch_B)) / true_grad_norm_sq
+
+                    S_ssqm_t_mb1 = eta_eff * (s_ssqm_sigma2_hat_mb1 / max(1, batch_B)) / true_grad_norm_sq
+                    S_rsqm_t_mb1 = eta_eff * (s_rsqm_sigma2_hat_mb1 / max(1, batch_B)) / true_grad_norm_sq
+                    S_ssqm_t_mb10 = eta_eff * (s_ssqm_sigma2_hat_mb10 / max(1, batch_B)) / true_grad_norm_sq
+                    S_rsqm_t_mb10 = eta_eff * (s_rsqm_sigma2_hat_mb10 / max(1, batch_B)) / true_grad_norm_sq
                     # --- SNR-based progress prediction (no scheduling) -----------------------
+                    # pred, pred_real, meanT, thresh, conf = snr_predictor.update(T_t_mb, T_t)
+                    # K_pred, K_pred_real, K_meanT, K_thresh, K_conf = snr_predictor.update(K_t_mb, T_t)
+                    # S_pred, S_pred_real, S_meanT, S_thresh, S_conf = snr_predictor.update(S_t_mb, T_t)
                     pred, pred_real, meanT, thresh, conf = snr_predictor.update(T_t_mb, T_t)
-                    K_pred, K_pred_real, K_meanT, K_thresh, K_conf = snr_predictor.update(K_t_mb, T_t)
-                    S_pred, S_pred_real, S_meanT, S_thresh, S_conf = snr_predictor.update(S_t_mb, T_t)
+                    K_rs_pred1, K_rs_pred_real1, K_rs_meanT1, K_rs_thresh1, K_rs_conf1 = snr_predictor.update(K_rs_t_mb1, T_t)
+                    K_ss_pred1, K_ss_pred_real1, K_ss_meanT1, K_ss_thresh1, K_ss_conf1 = snr_predictor.update(K_ss_t_mb1, T_t)
+                    K_rs_pred10, K_rs_pred_real10, K_rs_meanT10, K_rs_thresh10, K_rs_conf10 = snr_predictor.update(K_rs_t_mb10, T_t)
+                    K_ss_pred10, K_ss_pred_real10, K_ss_meanT10, K_ss_thresh10, K_ss_conf10 = snr_predictor.update(K_ss_t_mb10, T_t)
+                    S_scv_pred10, S_scv_pred_real10, S_scv_meanT10, S_scv_thresh10, S_scv_conf10 = snr_predictor.update(S_scv_t_mb10, T_t)
+                    S_svar_pred10, S_svar_pred_real10, S_svar_meanT10, S_svar_thresh10, S_svar_conf10 = snr_predictor.update(S_svar_t_mb10, T_t)
+                    S_rcv_pred10, S_rcv_pred_real10, S_rcv_meanT10, S_rcv_thresh10, S_rcv_conf10 = snr_predictor.update(S_rcv_t_mb10, T_t)
+                    S_rvar_pred10, S_rvar_pred_real10, S_rvar_meanT10, S_rvar_thresh10, S_rvar_conf10 = snr_predictor.update(S_rvar_t_mb10, T_t)
+                    S_scv_pred1, S_scv_pred_real1, S_scv_meanT1, S_scv_thresh1, S_scv_conf1 = snr_predictor.update(S_scv_t_mb1, T_t)
+                    S_svar_pred1, S_svar_pred_real1, S_svar_meanT1, S_svar_thresh1, S_svar_conf1 = snr_predictor.update(S_svar_t_mb1, T_t)
+                    S_rcv_pred1, S_rcv_pred_real1, S_rcv_meanT1, S_rcv_thresh1, S_rcv_conf1 = snr_predictor.update(S_rcv_t_mb1, T_t)
+                    S_rvar_pred1, S_rvar_pred_real1, S_rvar_meanT1, S_rvar_thresh1, S_rvar_conf1 = snr_predictor.update(S_rvar_t_mb1, T_t)
+                    S_ssqm_pred1, S_ssqm_pred_real1, S_ssqm_meanT1, S_ssqm_thresh1, S_ssqm_conf1 = snr_predictor.update(S_ssqm_t_mb1, T_t)
+                    S_rsqm_pred1, S_rsqm_pred_real1, S_rsqm_meanT1, S_rsqm_thresh1, S_rsqm_conf1 = snr_predictor.update(S_rsqm_t_mb1, T_t)
+                    S_ssqm_pred10, S_ssqm_pred_real10, S_ssqm_meanT10, S_ssqm_thresh10, S_ssqm_conf10 = snr_predictor.update(S_ssqm_t_mb10, T_t)
+                    S_rsqm_pred10, S_rsqm_pred_real10, S_rsqm_meanT10, S_rsqm_thresh10, S_rsqm_conf10 = snr_predictor.update(S_rsqm_t_mb10, T_t)
+
                     # Critical effective LR from Mark's 2nd trade-off
+                    # alpha_crit_t = (batch_B * true_grad_norm_sq) / max(sigma2_hat_mb, 1e-12)
+                    # alpha_crit_k = (batch_B * true_grad_norm_sq) / max(k_sigma2_hat_mb, 1e-12)
+                    # alpha_crit_s = (batch_B * true_grad_norm_sq) / max(s_sigma2_hat_mb, 1e-12)
                     alpha_crit_t = (batch_B * true_grad_norm_sq) / max(sigma2_hat_mb, 1e-12)
-                    alpha_crit_k = (batch_B * true_grad_norm_sq) / max(k_sigma2_hat_mb, 1e-12)
-                    alpha_crit_s = (batch_B * true_grad_norm_sq) / max(s_sigma2_hat_mb, 1e-12)
+                    alpha_crit_k_rs1 = (batch_B * true_grad_norm_sq) / max(k_rs_sigma2_hat_mb1, 1e-12)
+                    alpha_crit_k_ss1 = (batch_B * true_grad_norm_sq) / max(k_ss_sigma2_hat_mb1, 1e-12)
+                    alpha_crit_k_rs10 = (batch_B * true_grad_norm_sq) / max(k_rs_sigma2_hat_mb10, 1e-12)
+                    alpha_crit_k_ss10 = (batch_B * true_grad_norm_sq) / max(k_ss_sigma2_hat_mb10, 1e-12)
+                    alpha_crit_s_scv10 = (batch_B * true_grad_norm_sq) / max(s_scv_sigma2_hat_mb10, 1e-12)
+                    alpha_crit_s_svar10 = (batch_B * true_grad_norm_sq) / max(s_svar_sigma2_hat_mb10, 1e-12)
+                    alpha_crit_s_rcv10 = (batch_B * true_grad_norm_sq) / max(s_rcv_sigma2_hat_mb10, 1e-12)
+                    alpha_crit_s_rvar10 = (batch_B * true_grad_norm_sq) / max(s_rvar_sigma2_hat_mb10, 1e-12)
+                    alpha_crit_s_scv1 = (batch_B * true_grad_norm_sq) / max(s_scv_sigma2_hat_mb1, 1e-12)
+                    alpha_crit_s_svar1 = (batch_B * true_grad_norm_sq) / max(s_svar_sigma2_hat_mb1, 1e-12)
+                    alpha_crit_s_rcv1 = (batch_B * true_grad_norm_sq) / max(s_rcv_sigma2_hat_mb1, 1e-12)
+                    alpha_crit_s_rvar1 = (batch_B * true_grad_norm_sq) / max(s_rvar_sigma2_hat_mb1, 1e-12)
+                    alpha_crit_s_sqm1 = (batch_B * true_grad_norm_sq) / max(s_ssqm_sigma2_hat_mb1, 1e-12)
+                    alpha_crit_s_rsqm1 = (batch_B * true_grad_norm_sq) / max(s_rsqm_sigma2_hat_mb1, 1e-12)
+                    alpha_crit_s_sqm10 = (batch_B * true_grad_norm_sq) / max(s_ssqm_sigma2_hat_mb10, 1e-12)
+                    alpha_crit_s_rsqm10 = (batch_B * true_grad_norm_sq) / max(s_rsqm_sigma2_hat_mb10, 1e-12)
+                    alphas = {
+                        "alpha_crit_t": alpha_crit_t,
+                        "alpha_crit_k_rs1": alpha_crit_k_rs1,
+                        "alpha_crit_k_ss1": alpha_crit_k_ss1,
+                        "alpha_crit_k_rs10": alpha_crit_k_rs10,
+                        "alpha_crit_k_ss10": alpha_crit_k_ss10,
+                        "alpha_crit_s_scv10": alpha_crit_s_scv10,
+                        "alpha_crit_s_svar10": alpha_crit_s_svar10,
+                        "alpha_crit_s_rcv10": alpha_crit_s_rcv10,
+                        "alpha_crit_s_rvar10": alpha_crit_s_rvar10,
+                        "alpha_crit_s_scv1": alpha_crit_s_scv1,
+                        "alpha_crit_s_svar1": alpha_crit_s_svar1,
+                        "alpha_crit_s_rcv1": alpha_crit_s_rcv1,
+                        "alpha_crit_s_rvar1": alpha_crit_s_rvar1,
+                        "alpha_crit_s_sqm1": alpha_crit_s_sqm1,
+                        "alpha_crit_s_rsqm1": alpha_crit_s_rsqm1,
+                        "alpha_crit_s_sqm10": alpha_crit_s_sqm10,
+                        "alpha_crit_s_rsqm10": alpha_crit_s_rsqm10,
+                    }
 
                     # Prediction: 1 if we are above the critical LR
-                    snr_sum += pred_real 
-                    k_snr_sum += K_pred_real
-                    s_snr_sum += S_pred_real
+                    # snr_sum += pred_real 
+                    # k_snr_sum += K_pred_real
+                    # s_snr_sum += S_pred_real
+                    snr_sum += pred_real
+                    k_rs_sum1 += K_rs_pred_real1
+                    k_ss_sum1 += max(K_ss_pred_real1, union_eff_gt_acrit_step_ss1)
+                    k_rs_sum10 += K_rs_pred_real10
+                    k_ss_sum10 += max(K_ss_pred_real10, union_eff_gt_acrit_step_ss10)
+                    s_scv_sum10 += max(S_scv_pred_real10, union_eff_gt_acrit_step_scv10)
+                    s_svar_sum10 += max(S_svar_pred_real10, union_eff_gt_acrit_step_svar10)
+                    s_rcv_sum10 += S_rcv_pred_real10
+                    s_rvar_sum10 += S_rvar_pred_real10
+                    s_scv_sum1 += max(S_scv_pred_real1, union_eff_gt_acrit_step_scv1)
+                    s_svar_sum1 += max(S_svar_pred_real1,union_eff_gt_acrit_step_svar1)
+                    s_rcv_sum1 += S_rcv_pred_real1
+                    s_rvar_sum1 += S_rvar_pred_real1
+                    s_sqm_sum1 += max(S_ssqm_pred_real1, union_eff_gt_acrit_step_sqm1)
+                    s_rsqm_sum1 += S_rsqm_pred_real1
+                    s_sqm_sum10 += max(S_ssqm_pred_real10, union_eff_gt_acrit_step_sqm10)
+                    s_rsqm_sum10 += S_rsqm_pred_real10
+
 
                     mark = {
                         # "snr_T":            float(T_t) if T_t is not None else float("nan"),
                         # "snr_sigma2_hat":   float(sigma2_hat) if sigma2_hat is not None else float("nan"),
                         "mb_sigma2_hat":    float(sigma2_hat_mb),
                         "mb_snr_T":         float(T_t_mb),
-                        "S_t_mb":           float(S_t_mb),
+                        # "S_t_mb":           float(S_t_mb),
                         "sharpness":        sharpness,
-                        "K_t_mb":           float(K_t_mb),
+                        # "K_t_mb":           float(K_t_mb),
+                        **alphas,  # critical LRs
+                        # "alpha_crit_t":     float(alpha_crit_t),
+                        # "alpha_crit_k":     float(alpha_crit_k),
+                        # "alpha_crit_s":     float(alpha_crit_s),
 
-                        "alpha_crit_t":     float(alpha_crit_t),
-                        "alpha_crit_k":     float(alpha_crit_k),
-                        "alpha_crit_s":     float(alpha_crit_s),
-                        # "pred_eff_gt_acrit": int(pred_above_alpha),
-
-                        "snr_pred":         int(pred) if pred is not None else -1,
-                        "snr_pred_real":    int(pred_real) if pred_real is not None else -1,
-                        "snr_pred_conf":    float(conf) if conf is not None else float("nan"),
-                        "snr_T_mean":       float(meanT) if meanT is not None else float("nan"),
-                        "snr_T_thresh":     float(thresh) if thresh is not None else float("nan"),
-                        "snr_K_real":       int(K_pred_real) if K_pred_real is not None else -1,
-                        "snr_S_real":       int(S_pred_real) if S_pred_real is not None else -1,
+                        # "snr_pred":         int(pred) if pred is not None else -1,
+                        # "snr_pred_real":    int(pred_real) if pred_real is not None else -1,
+                        # "snr_pred_conf":    float(conf) if conf is not None else float("nan"),
+                        # "snr_T_mean":       float(meanT) if meanT is not None else float("nan"),
+                        # "snr_T_thresh":     float(thresh) if thresh is not None else float("nan"),
+                        # "snr_K_real":       int(K_pred_real) if K_pred_real is not None else -1,
+                        # "snr_S_real":       int(S_pred_real) if S_pred_real is not None else -1,
                     }
                     # ------------------------------------------------------------------------
                 optimizer.step()
@@ -655,12 +834,35 @@ for task in range(config.runs):
             "effective_rank": effective_rank,
             "task_acc": this_task_acc / (config.epochs * len(loader)),
             "snr_pct": 1 - (snr_sum / steps),
-            "k_snr_pct": 1 - (k_snr_sum / steps),
-            "s_snr_pct": 1 - (s_snr_sum / steps),
+            "k_rs_pct1": 1 - (k_rs_sum1 / steps),
+            "k_ss_pct1": 1 - (k_ss_sum1 / steps),
+            "k_rs_pct10": 1 - (k_rs_sum10 / steps),
+            "k_ss_pct10": 1 - (k_ss_sum10 / steps),
+            "s_scv_pct10": 1 - (s_scv_sum10 / steps),
+            "s_svar_pct10": 1 - (s_svar_sum10 / steps),
+            "s_rcv_pct10": 1 - (s_rcv_sum10 / steps),
+            "s_rvar_pct10": 1 - (s_rvar_sum10 / steps),
+            "s_scv_pct1": 1 - (s_scv_sum1 / steps),
+            "s_svar_pct1": 1 - (s_svar_sum1 / steps),
+            "s_rcv_pct1": 1 - (s_rcv_sum1 / steps),
+            "s_rvar_pct1": 1 - (s_rvar_sum1 / steps),
+            "s_sqm_pct1": 1 - (s_sqm_sum1 / steps),
+            "s_rsqm_pct1": 1 - (s_rsqm_sum1 / steps),
+            "s_sqm_pct10": 1 - (s_sqm_sum10 / steps),
+            "s_rsqm_pct10": 1 - (s_rsqm_sum10 / steps),
+            # "k_snr_pct": 1 - (k_snr_sum / steps),
+            # "s_snr_pct": 1 - (s_snr_sum / steps),
             "ly_snr_pct": 1 - (ly_snr_sum / steps),
             "ly_snr_pct2": 1 - (ly_snr_2_sum / steps),
             "ly_snr_pct_union": 1 - (ly_union_sum / steps),
-            "eff_safe_pct_union": 1 - (eff_acrit_union_sum / steps),
+            "eff_acrit_scv1_pct_union": 1 - (eff_acrit_scv1_union_sum / steps),
+            "eff_acrit_ss1_pct_union": 1 - (eff_acrit_ss1_union_sum / steps),
+            "eff_acrit_svar1_pct_union": 1 - (eff_acrit_svar1_union_sum / steps),
+            "eff_acrit_scv10_pct_union": 1 - (eff_acrit_scv10_union_sum / steps),
+            "eff_acrit_ss10_pct_union": 1 - (eff_acrit_ss10_union_sum / steps),
+            "eff_acrit_svar10_pct_union": 1 - (eff_acrit_svar10_union_sum / steps),
+            "eff_acrit_ssqm1_pct_union": 1 - (eff_acrit_ssqm1_union_sum / steps),
+            "eff_acrit_ssqm10_pct_union": 1 - (eff_acrit_ssqm10_union_sum / steps),
         }
     )
     res = results[config.activation]
