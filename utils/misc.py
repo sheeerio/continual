@@ -94,6 +94,7 @@ def update_stat(x: float,
         "ema_variation_inv":   state.ema_variation,
         "lam_var_cv":          lam_var_cv,
         "lam_var_mean":        lam_var_mean,
+        "sq_mean":             x**2 / (lam_mean + 1e-12) if lam_mean > 0 else 0.0,
         # variances with your original 1/(2·var) transform:
         "vol_1":               vols[0],
         "vol_2":               vols[1],
