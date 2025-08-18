@@ -14,7 +14,7 @@ from config import get_parser
 from utils import misc, schedulers, optimizers
 from models import mlp, cnn
 from datasets import data_loader
-from utils.optimizers import PerLayerLyapunovScheduler
+from utils.optimizers import PerLayerLyapunovScheduler, make_perm_tf
 
 parser = get_parser()
 config = parser.parse_args()
