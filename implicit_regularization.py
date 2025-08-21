@@ -14,7 +14,7 @@ from config import get_parser
 from utils import misc, schedulers, optimizers
 from models import mlp, cnn
 from datasets import data_loader
-from utils.optimizers import PerLayerLyapunovScheduler, make_perm_tf
+from utils.optimizers import PerLayerLyapunovScheduler
 
 parser = get_parser()
 config = parser.parse_args()
@@ -83,17 +83,16 @@ if config.model in [
 else:
     model.fc1.register_forward_hook(save_activations("l1"))
 
-layer_map = {}
-for name, p in model.named_parameters():
-    if p.requires_grad:
-        layer = name.split('.')[0]          # "fc1.weight" -> "fc1"
-        layer_map.setdefault(layer, []).append(p)
-
-layer_groups = [
-    {'params': params, 'lr': config.lr, 'layer': layer}   # keep default wd, betas...
-    for layer, params in layer_map.items()
-]
-
+def make_layer_groups(model, base_lr):
+    layer_map = {}
+    for name, p in model.named_parameters():
+        if p.requires_grad:
+            layer = name.split('.')[0]
+            layer_map.setdefault(layer, []).append(p)
+    layer_groups = [{'params': params, 'lr': base_lr, 'layer': layer}
+                    for layer, params in layer_map.items()]
+    return layer_map, layer_groups
+layer_map, layer_groups = make_layer_groups(model, config.lr)
 # ── one EMAState per layer ─────────────────────────────────────────────
 layer_states = {
     layer : misc.EMAState(alphas=(0.01, 0.05, 0.5))   # same alphas you used globally
@@ -106,8 +105,9 @@ wd = config.l2_lambda if config.reg == "l2" else 0.0
 if config.optimizer == "adam":
     optimizer = optim.Adam(layer_groups, lr=config.lr, weight_decay=wd, betas=(0.9, config.beta2))
 elif config.optimizer == "sgd": 
-    optimizer = torch.optim.SGD(model.parameters(), lr=config.lr, weight_decay=wd)
-
+    optimizer = torch.optim.SGD(layer_groups, lr=config.lr, weight_decay=wd, momentum=0.9)
+elif config.optimizer == "clamped_adam":
+    optimizer = optimizers.ClampedAdam(layer_groups, lr=config.lr, lr_min=1e-3, lr_max=1.1)
 #
 # base_optimizer = optimizer
 # optimizer = optimizers.CVSharpnessController(
@@ -233,9 +233,19 @@ for task in range(config.runs):
         else:
             model = mlp.BatchNormMLP(input_size, hidden, 10).to(device)
         if config.optimizer == "adam":
-            optimizer = optim.Adam(model.parameters(), lr=config.lr, weight_decay=wd, betas=(config.beta1, config.beta2))
-    if config.optimizer == "adam" and config.reset_optimizer:
-        optimizer.state.clear()
+            optimizer = optim.Adam(layer_groups, lr=config.lr, weight_decay=wd, betas=(config.beta1, config.beta2))
+        elif config.optimizer == "sgd":
+            optimizer = optim.SGD(layer_groups, lr=config.lr, weight_decay=wd, momentum=0.9)
+    if config.reset_optimizer:
+        layer_map, layer_groups = make_layer_groups(model, config.lr)
+        # Recreate optimizer using layer_groups (not model.parameters())
+        if config.optimizer == "adam":
+            optimizer = optim.Adam(layer_groups, lr=config.lr, weight_decay=wd, betas=(config.beta1, config.beta2))
+        elif config.optimizer == "sgd":
+            optimizer = optim.SGD(layer_groups, lr=config.lr, weight_decay=wd, momentum=0.9)
+        elif config.optimizer == "clamped_adam":
+            optimizer = optimizers.ClampedAdam(layer_groups, lr=config.lr, lr_min=1e-2, lr_max=0.8)
+
 
     if config.dataset == "PermutedMNIST":
         perm_tf = make_perm_tf(task)
@@ -271,8 +281,8 @@ for task in range(config.runs):
     model.train()
     ly_sched = None
     scheduler = None
+    total_steps = config.epochs * math.ceil(len(train_dataset) / config.batch_size)
     if config.lr_schedule == "linear":
-        total_steps = config.epochs * math.ceil(len(train_dataset) / config.batch_size)
         initial_lr = config.lr
         final_lr = config.final_lr
         decay_range = initial_lr - final_lr
@@ -292,7 +302,6 @@ for task in range(config.runs):
             optimizer, gamma=config.gamma
         )
     elif config.lr_schedule == "polynomial":
-        total_steps = config.epochs * math.ceil(len(train_dataset) / config.batch_size)
         scheduler = optim.lr_scheduler.LambdaLR(
             optimizer,
             lr_lambda=lambda step: (1 - step / total_steps) ** config.power,
@@ -320,13 +329,13 @@ for task in range(config.runs):
         scheduler = None
     elif config.lr_schedule == "pl_lyapunov":
         pl_scheduler = PerLayerLyapunovScheduler(
-            optimizer      = optimizer,
-            layer_states   = layer_states,
-            safety         = config.pl_lyap_safety,
-            cool           = config.pl_lyap_cool,
-            warm           = config.pl_lyap_warm,
+            optimizer    = optimizer,
+            layer_states = {layer: layer_states.get(layer, misc.EMAState(alphas=(0.01,0.05,0.5)))
+                            for layer in layer_map},
+            safety       = config.pl_lyap_safety,
+            cool         = config.pl_lyap_cool,
+            warm         = config.pl_lyap_warm,
         )
-
     else:
         scheduler = None
 
@@ -371,7 +380,6 @@ for task in range(config.runs):
                 for name, p in model.named_parameters():
                     if p.ndim < 2 or not p.requires_grad:
                         continue
-
                     if total_updates % config.ortho_interval == 0:
                         sigma_now = optimizers.power_iteration_sigma_min(p, iters=1).detach()
                         cached_sigma_min[name] = sigma_now
@@ -380,7 +388,6 @@ for task in range(config.runs):
                             name,
                             optimizers.power_iteration_sigma_min(p, iters=1).detach()
                         )
-
                     target = frac * init_sigma_min[name]
                     reg   += (sigma_now - target).pow(2)
                 reg *= config.ortho_lambda
@@ -407,7 +414,13 @@ for task in range(config.runs):
             #     trace_val = optimizers.hessian_trace(loss, params, n_samples=10)
 
             if total_updates % config.log_interval == 0:
-                layer_eff_lrs = optimizers.per_layer_effective_lr(model, optimizer)
+                if config.optimizer == "adam":
+                    layer_eff_lrs = optimizers.per_layer_effective_lr(model, optimizer)
+                else:  # SGD (+ momentum)
+                    layer_eff_lrs = optimizers.per_layer_sgd_lr(
+                        model, optimizer, step=total_updates, sgd_mode="time"
+                    )
+
 
                 layer_sigma2_mb = optimizers.grad_variance_within_batch_by_layer(
                     model, criterion_nored, inputs, labels, layer_map
@@ -439,14 +452,17 @@ for task in range(config.runs):
                     g_layer_sq = float(torch.cat([g.contiguous().view(-1) for g in gi]).pow(2).sum().item())
 
                     sigma2_l = float(layer_sigma2_mb.get(layer, 0.0))
-                    s_scv_sigma2_l1 = sigma2_l + 1.0 * g_layer_sq * scalars["lam_cv"]
-                    s_ss_sigma2_l1 = sigma2_l + 1.0 * g_layer_sq * norm_lam
-                    s_svar_sigma2_l1 = sigma2_l + 1.0 * g_layer_sq * scalars["lam_var"]
+                    s_scv_sigma2_l1 = sigma2_l + 10.0 * g_layer_sq * scalars["lam_cv"]
+                    s_ss_sigma2_l1 = sigma2_l + 10.0 * g_layer_sq * norm_lam
+                    s_svar_sigma2_l1 = sigma2_l + 10.0 * g_layer_sq * scalars["lam_var"]
                     s_sqm_sigma2_l1 = sigma2_l + 75.0 * g_layer_sq * scalars["sq_mean"]
-                    s_scv_sigma2_l10 = sigma2_l + 50.0 * g_layer_sq * scalars["lam_cv"]
-                    s_ss_sigma2_l10 = sigma2_l + 50.0 * g_layer_sq * norm_lam
-                    s_svar_sigma2_l10 = sigma2_l + 50.0 * g_layer_sq * scalars["lam_var"]
-                    s_sqm_sigma2_l10 = sigma2_l + 50.0 * g_layer_sq * scalars["sq_mean"]
+                    s_scv_sigma2_l10 = sigma2_l + 20.0 * g_layer_sq * scalars["lam_cv"]
+                    s_ss_sigma2_l10 = sigma2_l + 20.0 * g_layer_sq * norm_lam
+                    s_svar_sigma2_l10 = sigma2_l + 20.0 * g_layer_sq * scalars["lam_var"]
+                    s_sqm_sigma2_l10 = sigma2_l + 20.0 * g_layer_sq * scalars["sq_mean"]
+
+                    r = (sigma2_l / max(1, inputs.size(0))) / (g_layer_sq + 1e-12)
+                    eta_crit = min(0.8/r, 2/(norm_lam * (1 + r)))
 
                     B = int(inputs.size(0))
                     alpha_crit_scv_layer1 = (B * g_layer_sq) / max(s_scv_sigma2_l1, 1e-12)
@@ -496,7 +512,9 @@ for task in range(config.runs):
                     })
 
                     if config.lr_schedule == "pl_lyapunov":
-                        lr_star = pl_scheduler.step(layer, eff_lr, scalars["tau"], config)
+                        # if task <= 2:
+                            lr_star = pl_scheduler.step(layer, eff_lr, alpha_crit_sqm_layer10, config)
+                        # lr_star = pl_scheduler.step(layer, eff_lr, scalars["tau"], config)
 
                 # accumulate union across layers for this log step
                 ly_union_sum += union_pred_step
@@ -514,21 +532,19 @@ for task in range(config.runs):
                 lambda_min = optimizers.estimate_hessian_min_eig(model, loss, params, iters=20)
 
                 norm_sharpness = optimizers.get_norm_sharpness(optimizer, sharpness, config)
-                lambda_min_norm = optimizers.get_norm_sharpness(optimizer, lambda_min, config)
+                # lambda_min_norm = optimizers.get_norm_sharpness(optimizer, lambda_min, config)
                 this_normalized_sharp += norm_sharpness 
 
-                effective_lr = optimizers.compute_adam_effective_lr(optimizer)
+                effective_lr = optimizers.compute_effective_lr(
+                    optimizer, cfg=config, step=total_updates, sgd_mode="time"
+                )
 
                 sharp_state,  sharp_log  = misc.update_stat(norm_sharpness,  sharp_state,  effective_lr)
                 r_sharp_state,  r_sharp_log  = misc.update_stat(sharpness, r_sharp_state,  effective_lr)
-                lambda_state, lambda_log = misc.update_stat(lambda_min_norm, lambda_state, effective_lr)
+                # lambda_state, lambda_log = misc.update_stat(lambda_min_norm, lambda_state, effective_lr)
                 ly_snr_sum += sharp_log["collapse_pred"]
                 ly_snr_2_sum += sharp_log["collapse_pred2"]
-                if ly_sched is not None:
-                    lr_star, _ = ly_sched.step(effective_lr, lambda_log["tau"])
-                    log_extra  = {"ly_lr_star": lr_star}
-                else:
-                    log_extra  = {}
+                
 
             # Sharpness Aware Minimization
             if config.sam:
@@ -547,7 +563,7 @@ for task in range(config.runs):
 
                 for p, e in zip(params, epsilons):
                     p.data.sub_(e)
-                
+
             else:
                 loss.backward(retain_graph=True)
                 if total_updates % config.log_interval == 0:
@@ -558,7 +574,7 @@ for task in range(config.runs):
                     true_grad_norm_sq = float(grad_flat.pow(2).sum().item())
 
                     # 2) temporal proxy SNR (unchanged)
-                    eta_eff = effective_lr if config.optimizer == "adam" else optimizer.param_groups[0]["lr"]
+                    eta_eff = effective_lr
                     batch_B = inputs.size(0)
                     T_t, sigma2_hat = snr_tracker.update(grad_flat.detach(), eta_eff, int(batch_B))
                     if T_t is not None:
@@ -566,24 +582,25 @@ for task in range(config.runs):
 
                     # 3) within-minibatch σ² (Mark’s definition)
                     sigma2_hat_mb = optimizers.grad_variance_within_batch(model, criterion_nored, inputs, labels)
-                    k_rs_sigma2_hat_mb1 = sigma2_hat_mb + 1. * true_grad_norm_sq*sharpness
-                    k_ss_sigma2_hat_mb1 = sigma2_hat_mb + 1. * true_grad_norm_sq*norm_sharpness
-                    k_rs_sigma2_hat_mb10 = sigma2_hat_mb + 10. * true_grad_norm_sq*sharpness
-                    k_ss_sigma2_hat_mb10 = sigma2_hat_mb + 10. * true_grad_norm_sq*norm_sharpness
-                    s_scv_sigma2_hat_mb10 = sigma2_hat_mb + 50.0 * true_grad_norm_sq*sharp_log["lam_cv"]
-                    s_svar_sigma2_hat_mb10 = sigma2_hat_mb + 50.0 * true_grad_norm_sq*sharp_log["lam_var"]
-                    s_rcv_sigma2_hat_mb10 = sigma2_hat_mb + 50.0 * true_grad_norm_sq*r_sharp_log["lam_cv"]
-                    s_rvar_sigma2_hat_mb10 = sigma2_hat_mb + 50.0 * true_grad_norm_sq*r_sharp_log["lam_var"] # decent contender w/ a smaller coeff
-                    s_scv_sigma2_hat_mb1 = sigma2_hat_mb + 1.0 * true_grad_norm_sq*sharp_log["lam_cv"]
-                    s_svar_sigma2_hat_mb1 = sigma2_hat_mb + 1.0 * true_grad_norm_sq*sharp_log["lam_var"]
-                    s_rcv_sigma2_hat_mb1 = sigma2_hat_mb + 1.0 * true_grad_norm_sq*r_sharp_log["lam_cv"]
-                    s_rvar_sigma2_hat_mb1 = sigma2_hat_mb + 1.0 * true_grad_norm_sq*r_sharp_log["lam_var"]
-                    s_ssqm_sigma2_hat_mb10 = sigma2_hat_mb + 50.0 * true_grad_norm_sq*sharp_log["sq_mean"]
-                    s_rsqm_sigma2_hat_mb10 = sigma2_hat_mb + 50.0 * true_grad_norm_sq*r_sharp_log["sq_mean"]
+                    k_rs_sigma2_hat_mb1 = sigma2_hat_mb + 10.0 * true_grad_norm_sq*sharpness
+                    k_ss_sigma2_hat_mb1 = sigma2_hat_mb + 10.0 * true_grad_norm_sq*norm_sharpness
+                    k_rs_sigma2_hat_mb10 = sigma2_hat_mb + 20.0 * true_grad_norm_sq*sharpness
+                    k_ss_sigma2_hat_mb10 = sigma2_hat_mb + 20.0 * true_grad_norm_sq*norm_sharpness
+                    s_scv_sigma2_hat_mb10 = sigma2_hat_mb + 20.0 * true_grad_norm_sq*sharp_log["lam_cv"]
+                    s_svar_sigma2_hat_mb10 = sigma2_hat_mb + 20.0 * true_grad_norm_sq*sharp_log["lam_var"]
+                    s_rcv_sigma2_hat_mb10 = sigma2_hat_mb + 20.0 * true_grad_norm_sq*r_sharp_log["lam_cv"]
+                    s_rvar_sigma2_hat_mb10 = sigma2_hat_mb + 20.0 * true_grad_norm_sq*r_sharp_log["lam_var"] # decent contender w/ a smaller coeff
+                    s_scv_sigma2_hat_mb1 = sigma2_hat_mb + 10.0 * true_grad_norm_sq*sharp_log["lam_cv"]
+                    s_svar_sigma2_hat_mb1 = sigma2_hat_mb + 10.0 * true_grad_norm_sq*sharp_log["lam_var"]
+                    s_rcv_sigma2_hat_mb1 = sigma2_hat_mb + 10.0 * true_grad_norm_sq*r_sharp_log["lam_cv"]
+                    s_rvar_sigma2_hat_mb1 = sigma2_hat_mb + 10.0 * true_grad_norm_sq*r_sharp_log["lam_var"]
+                    s_ssqm_sigma2_hat_mb10 = sigma2_hat_mb + 20.0 * true_grad_norm_sq*sharp_log["sq_mean"]
+                    s_rsqm_sigma2_hat_mb10 = sigma2_hat_mb + 20.0 * true_grad_norm_sq*r_sharp_log["sq_mean"]
                     s_ssqm_sigma2_hat_mb1 = sigma2_hat_mb + 75.0 * true_grad_norm_sq*sharp_log["sq_mean"]
-                    s_rsqm_sigma2_hat_mb1 = sigma2_hat_mb + 1.0 * true_grad_norm_sq*r_sharp_log["sq_mean"]
+                    s_rsqm_sigma2_hat_mb1 = sigma2_hat_mb + 10.0 * true_grad_norm_sq*r_sharp_log["sq_mean"]
 
-
+                    r = (sigma2_hat_mb / max(1, batch_B)) / true_grad_norm_sq
+                    eta_crit = min(0.8/r, 2/(norm_sharpness * (1 + r)))
                     T_t_mb = eta_eff * (sigma2_hat_mb / max(1, batch_B)) / true_grad_norm_sq
                     # S_t_mb = eta_eff * (s_sigma2_hat_mb / max(1, batch_B)) / true_grad_norm_sq
                     # K_t_mb = eta_eff * (k_sigma2_hat_mb / max(1, batch_B)) / true_grad_norm_sq
@@ -691,6 +708,7 @@ for task in range(config.runs):
                     s_sqm_sum10 += max(S_ssqm_pred_real10, union_eff_gt_acrit_step_sqm10)
                     s_rsqm_sum10 += S_rsqm_pred_real10
 
+                    n_crit = min(0.8/r, 2/(norm_sharpness * (1 + r)))
 
                     mark = {
                         # "snr_T":            float(T_t) if T_t is not None else float("nan"),
@@ -699,6 +717,13 @@ for task in range(config.runs):
                         "mb_snr_T":         float(T_t_mb),
                         # "S_t_mb":           float(S_t_mb),
                         "sharpness":        sharpness,
+                        "rho":              effective_lr * sharpness / 2,
+                        "rho_norm":      effective_lr * norm_sharpness / 2,
+                        "n_crit_nois":  0.8/r,
+                        "n_crit_curv":  2/(norm_sharpness * (1 + r)),
+                        "n_crit":       min(0.8/r, 2/(norm_sharpness * (1 + r))),
+                        "lbo":          2/(sharpness+1e-12),
+                        "lbo_norm":     2/(norm_sharpness+1e-12),
                         # "K_t_mb":           float(K_t_mb),
                         **alphas,  # critical LRs
                         # "alpha_crit_t":     float(alpha_crit_t),
@@ -714,10 +739,17 @@ for task in range(config.runs):
                         # "snr_S_real":       int(S_pred_real) if S_pred_real is not None else -1,
                     }
                     # ------------------------------------------------------------------------
+                    if ly_sched is not None:
+                        lr_star, _ = ly_sched.step(effective_lr, alpha_crit_s_sqm1, total_updates, total_steps)
+                        log_extra  = {"ly_lr_star": lr_star}
+                    else:
+                        log_extra  = {}
                 optimizer.step()
                 
+                
                 # betas scheduling
-                optimizer.param_groups[0]['betas'] = optimizers.get_betas(config, epoch)
+                if config.optimizer == "adam":
+                    optimizer.param_groups[0]['betas'] = optimizers.get_betas(config, epoch)
                 # lr schedule step
                 if config.lr_schedule != "constant" and scheduler is not None:
                     scheduler.step()    
@@ -744,13 +776,6 @@ for task in range(config.runs):
             if total_updates % config.log_interval == 0:
                 # use_vals = { f"use_{name}": optimizers.compute_use_for_activation(h) for name, h in activations.items() }
                 # avg_use_val = sum(use_vals.values()) / len(use_vals)
-                gg, x = 0., 0.
-                for name, p in model.named_parameters():
-                    if p.requires_grad and p.dim() >= 2:
-                        # 1–3 inverse-power iterations are plenty at t=0
-                        s0 = optimizers.power_iteration_sigma_min(p.detach(), iters=1).item()
-                        gg += s0
-                # print(print_val)
                 gg, x = 0., 0.
                 for n, p in model.named_parameters():
                     if p.requires_grad and p.ndim >= 2:

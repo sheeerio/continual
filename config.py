@@ -77,7 +77,7 @@ def get_parser():
     )
     parser.add_argument("--wass_lambda", type=float, default=0.0)
     parser.add_argument("--exp_name", type=str, default="")
-    parser.add_argument("--optimizer", type=str, default="adam", choices=["adam", "sgd"])
+    parser.add_argument("--optimizer", type=str, default="adam", choices=["adam", "sgd", "clamped_adam"])
     # Wsd scheduler hyperparameters
     parser.add_argument(
         "--wsd_warmup_tokens",

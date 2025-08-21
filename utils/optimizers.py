@@ -279,7 +279,7 @@ def get_betas(cfg, epoch):
             beta2 = 0.75
         return (beta1, beta2)
     else:
-        raise ValueError("Optimizer is not Adam, cannot get betas.")
+        raise ValueError("optimizer is not Adam, cannot get betas.")
 
 
 class LyapunovScheduler:
@@ -291,15 +291,15 @@ class LyapunovScheduler:
                 opt,
                 ema_state: EMAState,
                 safety: float = 0.9,
-                cool:   float = 0.5,
-                warm:   float = 1.05):
+                cool:   float = 0.999,
+                warm:   float = 1.00001):
         self.opt      = opt
         self.state    = ema_state          # shared object, updated elsewhere
         self.safety   = safety
         self.cool     = cool
         self.warm     = warm
 
-    def step(self, effective_lr: float, tau: float) -> Tuple[float, float]:
+    def step(self, effective_lr: float, tau: float, current_step, total_steps) -> Tuple[float, float]:
         """
         Adjust the optimiser’s LR **in-place** according to the Lyapunov bound.
         `effective_lr` is the value you just computed for logging.
@@ -313,7 +313,7 @@ class LyapunovScheduler:
         if effective_lr > 0.12 and effective_lr > self.safety * lr_star:    # too aggressive
             for g in self.opt.param_groups:
                 g['lr'] *= self.cool
-        # elif effective_lr < 0.5 * self.safety * lr_star:    # can warm up
+        # elif current_step > total_steps * 0.01 and current_step < total_steps * 0.06 and effective_lr < 0.5* self.safety * lr_star:    # can warm up
         #     for g in self.opt.param_groups:
         #         g['lr'] *= self.warm
 
@@ -349,28 +349,70 @@ def estimate_hessian_min_eig(model, loss, params, iters=100):
 import math
 from typing import Optional
 
-def compute_adam_effective_lr(optimizer: torch.optim.Adam,
-                              eps: float = None
-                              ) -> float:
+def compute_effective_lr(optimizer: torch.optim.Optimizer,
+                         eps: float = None,
+                         cfg: Optional[None] = None,
+                         *,
+                         step: int | None = None,
+                         sgd_mode: str = "time") -> float:
     """
-    For an Adam optimizer, average over all params the
-    per‐param lr/(√(exp_avg_sq)+ε) to get a single effective lr.
+    Returns a single scalar 'effective LR'.
+
+    - For SGD (with momentum): uses η_eff(t) = η * (1 - μ^t)/(1 - μ)  (default)
+      Pass sgd_mode="asymptotic" to get η/(1-μ).
+      'step' should be the global optimizer step; if None, we try to infer it.
+
+    - For Adam/AdamW: average over params:   lr / (sqrt(v_hat_mean) + eps)
     """
     group = optimizer.param_groups[0]
-    base_lr = group['lr']
-    eps     = group.get('eps', 1e-8) if eps is None else eps
+    base_lr = float(group.get('lr', 0.0))
+
+    # --- SGD path --------------------------------------------------------
+    if cfg is not None and getattr(cfg, "optimizer", "").lower() == "sgd":
+        momentum = float(group.get('momentum', 0.0))
+
+        # Try to infer step if not provided (SGD usually doesn't track it)
+        if step is None:
+            inferred = 0
+            for p in group.get("params", []):
+                st = optimizer.state.get(p, None)
+                if st is not None and "step" in st:
+                    inferred = max(inferred, int(st["step"]))
+            step = inferred if inferred > 0 else None
+
+        mode = "time" if sgd_mode == "time" else "asymptotic"
+        return sgd_momentum_eta_eff(base_lr, momentum, step, mode=mode)
+
+    # --- Adam/AdamW path -------------------------------------------------
+    eps = group.get('eps', 1e-8) if eps is None else eps
 
     effs = []
-    for p in group['params']:
-        st = optimizer.state[p]
-        if 'exp_avg_sq' in st:
-            # compute RMS of the second‐moment buffer
-            v_avg = st['exp_avg_sq'].mean().sqrt().item()
-            effs.append(base_lr / (v_avg + eps))
+    for p in group.get("params", []):
+        st = optimizer.state.get(p, None)
+        if not st:
+            continue
+        v = st.get("max_exp_avg_sq") if group.get("amsgrad", False) and "max_exp_avg_sq" in st \
+            else st.get("exp_avg_sq")
+        if v is None or v.numel() == 0:
+            continue
 
+        # bias-correct v
+        beta1, beta2 = group.get("betas", (0.9, 0.999))
+        step_p = int(st.get("step", 0))
+        if step_p < 1:
+            continue
+        bc1 = 1.0 - (beta1 ** step_p)
+        bc2 = 1.0 - (beta2 ** step_p)
+        v_hat_mean = v.float().mean().item() / bc2
+        denom = math.sqrt(max(v_hat_mean, 0.0)) + eps
+
+        raw = base_lr / (bc1 * denom)
+
+        # if the optimizer is ClampedAdam, respect its bounds
+        lr_min = getattr(optimizer, "lr_min", -float("inf"))
+        lr_max = getattr(optimizer, "lr_max",  float("inf"))
+        effs.append(max(lr_min, min(raw, lr_max)))
     return float(np.mean(effs)) if effs else base_lr
-
-
 # ---- CV-of-Sharpness feedback controller ------------------------------------
 import numpy as np
 from collections import deque
@@ -426,78 +468,177 @@ def per_layer_effective_lr(
     model: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
     *,
-    include_ndim1: bool = False,   # False => skip 1D params (bias / BN)
-    eps: Optional[float] = None    # override group eps if desired
+    include_ndim1: bool = False,   # False ⇒ skip biases/BN by default
+    eps: float | None = None       # override group eps if desired
 ) -> dict[str, float]:
     """
-    Per-layer 'effective LR' for Adam/AdamW:
-        eff(p) = lr_group / ( sqrt(mean(v_hat)) + eps_group )
+    Per-layer *effective step multiplier* applied in Adam-style updates:
+        step_t(p) = lr / ((1-β1^t) * (sqrt(v_hat) + eps))
 
-    - Bias-corrects v (uses v_hat) and respects AMSGrad.
-    - Aggregates by top-level module (e.g., 'fc1' from 'fc1.weight').
-    - Skips non-trainable and, by default, 1D tensors.
-    - Avoids tensor equality by matching params via id(p).
+    - Matches ClampedAdam’s actual update (β-corrections + optional AMSGrad).
+    - Returns the *clamped* elementwise factor, averaged within each layer.
+    - Skips params with step < 1 to avoid lr/eps artefacts.
     """
-    # Map parameter identity → name for aggregation
-    id2name = {id(p): name for name, p in model.named_parameters()}
+    import math
+    # map param id → full name ("fc1.weight"), so we can group by top-level ("fc1")
+    id2name = {id(p): n for n, p in model.named_parameters()}
+    layer_sum: dict[str, float]   = {}
+    layer_cnt: dict[str, int]     = {}
 
-    layer_sums: dict[str, float] = {}
-    layer_counts: dict[str, int] = {}
+    # global clamp bounds if present (ClampedAdam exposes these on the optimizer)
+    LR_MIN = getattr(optimizer, "lr_min", float("-inf"))
+    LR_MAX = getattr(optimizer, "lr_max", float("inf"))
 
     for group in optimizer.param_groups:
-        base_lr = float(group.get("lr", 0.0))
+        base_lr   = float(group.get("lr", 0.0))
         if base_lr == 0.0:
             continue
+        g_eps     = float(group.get("eps", 1e-8) if eps is None else eps)
+        beta1, beta2 = group.get("betas", (0.9, 0.999))
+        use_ams   = bool(group.get("amsgrad", False))
 
-        group_eps   = float(group.get("eps", 1e-8) if eps is None else eps)
-        beta2       = float(group.get("betas", (0.9, 0.999))[1])
-        use_amsgrad = bool(group.get("amsgrad", False))
+        # set of ids to avoid tensor equality checks
+        group_param_ids = {id(p) for p in group.get("params", [])}
 
-        # Identity set to avoid tensor equality comparisons
-        group_param_ids = {id(q) for q in group.get("params", [])}
-
-        for q in group.get("params", []):
-            if id(q) not in group_param_ids:   # (redundant, but explicit)
+        for p in group.get("params", []):
+            if id(p) not in group_param_ids or not getattr(p, "requires_grad", False):
                 continue
-            if not getattr(q, "requires_grad", False):
-                continue
-            if (not include_ndim1) and (q.ndim <= 1):
+            if (not include_ndim1) and (p.ndim <= 1):
                 continue
 
-            st = optimizer.state.get(q, None)
+            st = optimizer.state.get(p)
             if not st:
                 continue
+            t = int(st.get("step", 0))
+            if t < 1:
+                continue  # skip cold params
 
-            # Choose second-moment buffer (AMSGrad if present)
-            v = st.get("max_exp_avg_sq") if (use_amsgrad and "max_exp_avg_sq" in st) else st.get("exp_avg_sq")
+            # pick v-buffer (AMSGrad if available)
+            v = st.get("max_exp_avg_sq") if (use_ams and "max_exp_avg_sq" in st) else st.get("exp_avg_sq")
             if v is None or v.numel() == 0:
                 continue
 
-            step = int(st.get("step", 0))
-            if step <= 0:
-                denom = group_eps
-            else:
-                bc2 = 1.0 - (beta2 ** step)
-                if bc2 <= 0.0:
-                    continue
-                v_hat_mean = (v.float().mean().item() / bc2)
-                denom = math.sqrt(max(v_hat_mean, 0.0)) + group_eps
-
-            if denom <= 0.0 or not math.isfinite(denom):
+            # bias corrections
+            bc1 = 1.0 - (beta1 ** t)
+            bc2 = 1.0 - (beta2 ** t)
+            if bc1 <= 0.0 or bc2 <= 0.0:
                 continue
 
-            eff = base_lr / denom
+            # v_hat mean and denom
+            v_hat_mean = float(v.float().mean().item()) / bc2
+            denom = math.sqrt(max(v_hat_mean, 0.0)) + g_eps
 
-            # Aggregate by layer name
-            name = id2name.get(id(q), None)
+            raw_step = base_lr / (bc1 * denom)        # exact multiplier on m_t
+            step_clamped = max(LR_MIN, min(raw_step, LR_MAX))
+
+            # aggregate by top-level layer name
+            name = id2name.get(id(p))
             if name is None:
                 continue
-            layer = name.split('.', 1)[0] if '.' in name else name
+            layer = name.split(".", 1)[0]
+            layer_sum[layer] = layer_sum.get(layer, 0.0) + step_clamped
+            layer_cnt[layer] = layer_cnt.get(layer, 0) + 1
 
-            layer_sums[layer]   = layer_sums.get(layer, 0.0) + eff
-            layer_counts[layer] = layer_counts.get(layer, 0)   + 1
+    return {k: (layer_sum[k] / layer_cnt[k]) for k in layer_sum}
 
-    return {k: (layer_sums[k] / layer_counts[k]) for k in layer_sums}
+def per_layer_sgd_lr(
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    *,
+    include_ndim1: bool = False,
+    step: int | None = None,
+    sgd_mode: str = "time"  # "time" ⇒ warm-up aware; "asymptotic" ⇒ η/(1-μ)
+) -> dict[str, float]:
+    """
+    Per-layer *effective* LR for SGD with momentum.
+    Aggregates by top-level module name.
+    """
+    id2name = {id(p): name for name, p in model.named_parameters()}
+    layer_lrs: dict[str, float] = {}
+
+    group = optimizer.param_groups[0]
+    base_lr = float(group.get("lr", 0.0))
+    mu      = float(group.get("momentum", 0.0))
+
+    # Try to infer step if not provided
+    if step is None:
+        inferred = 0
+        for p in group.get("params", []):
+            st = optimizer.state.get(p, None)
+            if st is not None and "step" in st:
+                inferred = max(inferred, int(st["step"]))
+        step = inferred if inferred > 0 else None
+
+    eff = sgd_momentum_eta_eff(base_lr, mu, step,
+                               mode=("time" if sgd_mode == "time" else "asymptotic"))
+
+    group_param_ids = {id(q) for q in group.get("params", [])}
+    for q in group.get("params", []):
+        if id(q) not in group_param_ids:
+            continue
+        if not getattr(q, "requires_grad", False):
+            continue
+        if (not include_ndim1) and (q.ndim <= 1):
+            continue
+
+        name = id2name.get(id(q), None)
+        if name is None:
+            continue
+        layer = name.split('.', 1)[0] if '.' in name else name
+        layer_lrs[layer] = eff
+    return layer_lrs
+
+import math
+from typing import Optional, Literal
+
+def sgd_momentum_eta_eff(
+    lr: float,
+    momentum: float,
+    step: int | None,
+    *,
+    mode: Literal["time", "asymptotic"] = "time"
+) -> float:
+    """
+    Effective scalar learning rate for SGD + momentum.
+
+    v_t = μ v_{t-1} - η g_t
+    Δθ_t = v_t = - η_eff(t) * g_t  (under approx. constant direction)
+
+    - mode="time":   η_eff(t) = η * (1 - μ^t) / (1 - μ)   (warm-up aware)
+    - mode="asymptotic":       η / (1 - μ)
+    """
+    mu = float(momentum)
+    if mu == 0.0:
+        return float(lr)
+    if mode == "asymptotic":
+        return float(lr) / (1.0 - mu)
+
+    # time-dependent (warm-up); need a positive step count
+    t = max(int(step or 0), 1)
+    return float(lr) * (1.0 - (mu ** t)) / (1.0 - mu)
+
+
+def sgd_weight_decay_factor(
+    lr: float,
+    weight_decay: float,
+    *,
+    decoupled: bool
+) -> float:
+    """
+    Per-step multiplicative shrink on parameters due to weight decay.
+
+    - decoupled=True (AdamW-style):     θ ← (1 - ηλ) θ + update
+    - decoupled=False (classical):      decay is folded into the 'gradient term'
+      (no separate multiplicative factor to report).
+    """
+    lam = float(weight_decay)
+    if lam <= 0.0:
+        return 1.0
+    if decoupled:
+        return max(0.0, 1.0 - float(lr) * lam)
+    else:
+        # classical L2: no separate multiplicative factor; effect is in the gradient
+        return 1.0
 
 
 class PerLayerLyapunovScheduler:
@@ -506,7 +647,7 @@ class PerLayerLyapunovScheduler:
     where τ comes from your EMAState collapse bound.
     """
     def __init__(self, optimizer, layer_states,
-                 safety=0.9, cool=0.50, warm=1.05):
+                 safety=0.9, cool=0.999, warm=1.01):
         self.opt          = optimizer
         self.layer_states = layer_states
         self.safety, self.cool, self.warm = safety, cool, warm
@@ -627,7 +768,7 @@ class SNRProgressPredictor:
             T_proxy if (T_proxy is not None and not math.isnan(T_proxy)) else None
         )
         if t is None:
-            return None, None, None, None  # pred, meanT, thresh, conf
+            return None, None, None, None, None  # pred, meanT, thresh, conf
 
         self.win.append(float(t))
         meanT = sum(self.win) / len(self.win)
@@ -694,3 +835,61 @@ def grad_variance_within_batch_by_layer(model, loss_fn, inputs, targets, layer_m
         sigma2_by_layer[layer] = float(sigma2)
 
     return sigma2_by_layer
+
+from torch.optim import Adam
+
+class ClampedAdam(Adam):
+    def __init__(self, params, lr=1e-3, betas=(0.9, 0.999), eps=1e-8,
+                 weight_decay=0, amsgrad=False,
+                 lr_min=1e-6, lr_max=1.0):
+        super().__init__(params, lr=lr, betas=betas, eps=eps,
+                         weight_decay=weight_decay, amsgrad=amsgrad)
+        self.lr_min = lr_min
+        self.lr_max = lr_max
+
+    @torch.no_grad()
+    def step(self, closure=None):
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+
+        for group in self.param_groups:
+            for p in group['params']:
+                if p.grad is None:
+                    continue
+                grad = p.grad
+
+                state = self.state[p]
+
+                # State init
+                if len(state) == 0:
+                    state['step'] = 0
+                    state['exp_avg'] = torch.zeros_like(p)
+                    state['exp_avg_sq'] = torch.zeros_like(p)
+                    if group['amsgrad']:
+                        state['max_exp_avg_sq'] = torch.zeros_like(p)
+
+                exp_avg, exp_avg_sq = state['exp_avg'], state['exp_avg_sq']
+                beta1, beta2 = group['betas']
+
+                state['step'] += 1
+                exp_avg.mul_(beta1).add_(grad, alpha=1 - beta1)
+                exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
+
+                # Bias correction
+                bias_correction1 = 1 - beta1 ** state['step']
+                bias_correction2 = 1 - beta2 ** state['step']
+                denom = (exp_avg_sq.sqrt() / (bias_correction2 ** 0.5)).add_(group['eps'])
+
+                # Compute unclamped effective LR
+                effective_lr = group['lr'] / denom
+
+                # Clamp
+                effective_lr = torch.clamp(effective_lr, self.lr_min, self.lr_max)
+
+                # Parameter update
+                step_size = effective_lr / bias_correction1
+                p.addcmul_(exp_avg, -step_size)
+
+        return loss
