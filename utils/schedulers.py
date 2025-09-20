@@ -4,7 +4,7 @@ import math
 config = get_parser().parse_args()
 
 # total_steps  = config.epochs * math.ceil(len(train_dataset) / config.batch_size)
-total_steps = config.epochs * (20100 // config.batch_size)  # Assuming 50,000 training samples for MNIST
+total_steps = config.epochs * (20100 // config.batch_size) 
 total_tokens = total_steps * config.batch_size
 
 def skew_lambda(step):
@@ -36,11 +36,8 @@ def power_lambda(step):
         config.lr,
     )
     if n < Nw:
-        # warmup to η_power(Nw)
         return (n / Nw) * (eta_pw(Nw) / config.lr)
     else:
-        # middle: pure power‐law
         return eta_pw(n) / config.lr
     # else:
-    #     # final decay of the *value* at n = N – Nd
     #     return ((total_tokens - n) / Nd) * (eta_pw(total_tokens - Nd) / config.lr)

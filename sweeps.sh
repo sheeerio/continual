@@ -4,28 +4,16 @@
 MAX_PARALLEL_JOBS=4     # keep your GPU happy
 COMMANDS=()
 
-lrs=1e-3
-lambdas=1e-3   # 0 ⇒ “classic” baseline
-seeds=2025  # for reproducibility
+lrs=1e-4
+seeds=(1 2 3)  # for reproducibility
 
 # ──────────────────────── 1.  MLP + Wasserstein  ───────────────────────────
-for lam in "${lambdas[@]}"; do
-  COMMANDS+=("python3 implicit_regularization.py \
-    --seed 2025 --model MLP --activation relu --runs 50 \
-    --reg wass --wass_lambda 1e-2 \
-    --batch_size 256 --epochs 500 --optimizer adam \
-    --lr 1e-3 --dataset MNIST \
-    --name sweeps_wass_lr1e-3_lam1e-3_seed2025 --exp_name under")
-done
-
-# ───────────────────── 2.  BatchNormMLP + L2  ──────────────────────────────
-for lam in "${lambdas[@]}"; do
-  COMMANDS+=("python3 implicit_regularization.py \
-    --seed 2025 --model BatchNormMLP --activation relu --runs 50 \
-    --reg l2 --l2_lambda 1e-3 \
-    --batch_size 256 --epochs 500 --optimizer adam \
-    --lr 1e-3 --dataset MNIST \
-    --name sweeps_bn_l2_lr1e-3_wd1e-3_seed2025 --exp_name sweeps")
+for seed in "${seeds[@]}"; do
+    COMMANDS+=("python3 implicit_regularization.py \
+        --seed $seed --model MLP --activation relu --runs 50 \
+        --batch_size 256 --epochs 500 --optimizer adam \
+        --lr 1e-4 --dataset MNIST \
+        --name sweeps_relu_lr_1e-4 --exp_name sweeps")
 done
 
 PIDS=()
