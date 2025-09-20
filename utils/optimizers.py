@@ -11,8 +11,9 @@ from utils.misc import EMAState
 import torch.optim as optim
 from torch.optim import Adam
 
+
 # def power_iteration_sigma_min(W: torch.Tensor, iters: int = 3, eps: float = 1e-6):
-#     WT_W = W.T @ W 
+#     WT_W = W.T @ W
 #     v = torch.randn(WT_W.shape[0], device=W.device)
 #     v = v / v.norm()
 #     I = torch.eye(WT_W.shape[0], device=W.device)
@@ -21,16 +22,16 @@ from torch.optim import Adam
 #         v = v / (v.norm() + 1e-12)
 #     sigma_min_sq = torch.dot(v, WT_W @ v)
 #     return torch.sqrt(sigma_min_sq + 1e-12)
-def power_iteration_sigma_min(W: torch.Tensor,
-                               iters: int = 3,
-                               shift_mult: float = 1e-3) -> torch.Tensor:
+def power_iteration_sigma_min(
+    W: torch.Tensor, iters: int = 3, shift_mult: float = 1e-3
+) -> torch.Tensor:
     m, n = W.shape
-    use_WtW = (n <= m)
-    A = W.T @ W if use_WtW else W @ W.T 
+    use_WtW = n <= m
+    A = W.T @ W if use_WtW else W @ W.T
 
     diag_mean = A.diagonal().mean()
-    ridge     = shift_mult * diag_mean + 1e-6 
-    A_shift   = A + ridge * torch.eye(A.size(0), device=W.device, dtype=W.dtype)
+    ridge = shift_mult * diag_mean + 1e-6
+    A_shift = A + ridge * torch.eye(A.size(0), device=W.device, dtype=W.dtype)
 
     v = torch.randn(A_shift.shape[0], device=W.device, dtype=W.dtype)
     v.div_(v.norm() + 1e-12)
@@ -82,6 +83,7 @@ def randomize_targets(dataset, p):
             dataset.targets = targets_list
         return dataset
 
+
 def preconditioned_sharpness(loss, params, nu, epsilon=1e-8, iters=20):
     nu_flat = torch.cat([n.detach().view(-1) for n in nu])
     P_inv_diag = 1.0 / (torch.sqrt(nu_flat) + epsilon)
@@ -109,6 +111,7 @@ def preconditioned_sharpness(loss, params, nu, epsilon=1e-8, iters=20):
 
     return v.dot(w).item()
 
+
 def empirical_fischer_rank(model, dataset, device, thresh=0.99, max_m=100, cfg=None):
     loader = data.DataLoader(dataset, batch_size=1, shuffle=False)
     model.eval()
@@ -125,7 +128,7 @@ def empirical_fischer_rank(model, dataset, device, thresh=0.99, max_m=100, cfg=N
         y = y.to(device)
         model.zero_grad()
         output = model(x)
-        loss = nn.CrossEntropyLoss(reduction='mean')(output, y)
+        loss = nn.CrossEntropyLoss(reduction="mean")(output, y)
         loss.backward(retain_graph=True)
         g = torch.cat([p.grad.view(-1) for p in params])
         grads.append(g)
@@ -135,7 +138,7 @@ def empirical_fischer_rank(model, dataset, device, thresh=0.99, max_m=100, cfg=N
     sig = torch.linalg.svdvals(M)
     cumsum = torch.cumsum(sig, dim=0)
     total = cumsum[-1]
-    j = (cumsum / total >= thresh).nonzero()[0].item() + 1 if total !=0 else 0
+    j = (cumsum / total >= thresh).nonzero()[0].item() + 1 if total != 0 else 0
     return j / float(m)
 
 
@@ -154,19 +157,20 @@ def estimate_hessian_topk(model, loss, params, k=1, iters=100):
     for _ in range(k):
         v = torch.randn(n, device=flat_grad.device)
         v = v / (v.norm() + 1e-12)
-        
+
         for _ in range(iters):
             w = hvp(v)
             for j, u in enumerate(vs):
                 w = w - eigs[j] * (u.dot(w)) * u
             v = w / (w.norm() + 1e-12)
-        
+
         Hv = hvp(v)
         lam = v.dot(Hv).item()
         eigs.append(lam)
         vs.append(v)
-    
+
     return eigs
+
 
 def compute_use_for_activation(h):
     with torch.no_grad():
@@ -196,6 +200,7 @@ def hessian_trace(loss, params, n_samples=1):
         trace_est += (flat_grad * Hv_flat).sum().item()
     return trace_est / n_samples
 
+
 def get_norm_sharpness(optimizer, sharpness, cfg):
     v_squares = []
     for group in optimizer.param_groups:
@@ -219,6 +224,7 @@ def get_norm_sharpness(optimizer, sharpness, cfg):
 
     return norm_sharpness
 
+
 def get_betas(cfg, epoch):
     if cfg.optimizer == "adam":
         end = 2 * cfg.epochs
@@ -234,32 +240,40 @@ def get_betas(cfg, epoch):
 
 
 class LyapunovScheduler:
-    def __init__(self,
-                opt,
-                ema_state: EMAState,
-                safety: float = 0.9,
-                cool:   float = 0.999,
-                warm:   float = 1.00001,
-                cfg =  None):
-        self.opt      = opt
-        self.state    = ema_state    
-        self.safety   = cfg.safety
-        self.cool     = cool
-        self.warm     = warm
+    def __init__(
+        self,
+        opt,
+        ema_state: EMAState,
+        safety: float = 0.9,
+        cool: float = 0.999,
+        warm: float = 1.00001,
+        cfg=None,
+    ):
+        self.opt = opt
+        self.state = ema_state
+        self.safety = cfg.safety
+        self.cool = cool
+        self.warm = warm
 
-    def step(self, effective_lr: float, tau: float, current_step: int, total_steps: int) -> Tuple[float, float]:
+    def step(
+        self, effective_lr: float, tau: float, current_step: int, total_steps: int
+    ) -> Tuple[float, float]:
         if not self.state.ema_variation or self.state.ema_variation == 0.0:
-            return float('inf'), effective_lr
+            return float("inf"), effective_lr
 
         lr_star = tau
         if effective_lr > 0.12 and effective_lr > self.safety * lr_star:
             for g in self.opt.param_groups:
-                g['lr'] *= self.cool
-        elif current_step < total_steps * 0.1 and effective_lr < 0.3 * self.safety * lr_star:
+                g["lr"] *= self.cool
+        elif (
+            current_step < total_steps * 0.1
+            and effective_lr < 0.3 * self.safety * lr_star
+        ):
             for g in self.opt.param_groups:
-                g['lr'] *= self.warm
+                g["lr"] *= self.warm
 
         return lr_star, effective_lr
+
 
 def estimate_hessian_min_eig(model, loss, params, iters=100):
     grads = torch.autograd.grad(loss, params, create_graph=True)
@@ -268,32 +282,37 @@ def estimate_hessian_min_eig(model, loss, params, iters=100):
 
     def hvp_minus(v):
         g_v = (g_flat * v).sum()
-        Hv  = torch.autograd.grad(g_v, params, retain_graph=True)
+        Hv = torch.autograd.grad(g_v, params, retain_graph=True)
         return -torch.cat([h.contiguous().view(-1) for h in Hv]).detach()  # -H v
 
-    v = torch.randn(d, device=g_flat.device);  v /= v.norm() + 1e-12
+    v = torch.randn(d, device=g_flat.device)
+    v /= v.norm() + 1e-12
     for _ in range(iters):
         w = hvp_minus(v)
         v = w / (w.norm() + 1e-12)
 
-    Hv  = hvp_minus(v) 
-    lam = v.dot(Hv).item()  
+    Hv = hvp_minus(v)
+    lam = v.dot(Hv).item()
     return -lam
+
 
 import math
 from typing import Optional
 
-def compute_effective_lr(optimizer: torch.optim.Optimizer,
-                         eps: float = None,
-                         cfg: Optional[None] = None,
-                         *,
-                         step: int | None = None,
-                         sgd_mode: str = "time") -> float:
+
+def compute_effective_lr(
+    optimizer: torch.optim.Optimizer,
+    eps: float = None,
+    cfg: Optional[None] = None,
+    *,
+    step: int | None = None,
+    sgd_mode: str = "time"
+) -> float:
     group = optimizer.param_groups[0]
-    base_lr = float(group.get('lr', 0.0))
+    base_lr = float(group.get("lr", 0.0))
 
     if cfg is not None and getattr(cfg, "optimizer", "").lower() == "sgd":
-        momentum = float(group.get('momentum', 0.0))
+        momentum = float(group.get("momentum", 0.0))
 
         if step is None:
             inferred = 0
@@ -306,15 +325,18 @@ def compute_effective_lr(optimizer: torch.optim.Optimizer,
         mode = "time" if sgd_mode == "time" else "asymptotic"
         return sgd_momentum_eta_eff(base_lr, momentum, step, mode=mode)
 
-    eps = group.get('eps', 1e-8) if eps is None else eps
+    eps = group.get("eps", 1e-8) if eps is None else eps
 
     effs = []
     for p in group.get("params", []):
         st = optimizer.state.get(p, None)
         if not st:
             continue
-        v = st.get("max_exp_avg_sq") if group.get("amsgrad", False) and "max_exp_avg_sq" in st \
+        v = (
+            st.get("max_exp_avg_sq")
+            if group.get("amsgrad", False) and "max_exp_avg_sq" in st
             else st.get("exp_avg_sq")
+        )
         if v is None or v.numel() == 0:
             continue
 
@@ -322,18 +344,17 @@ def compute_effective_lr(optimizer: torch.optim.Optimizer,
         step_p = int(st.get("step", 0))
         if step_p < 1:
             continue
-        bc1 = 1.0 - (beta1 ** step_p)
-        bc2 = 1.0 - (beta2 ** step_p)
+        bc1 = 1.0 - (beta1**step_p)
+        bc2 = 1.0 - (beta2**step_p)
         v_hat_mean = v.float().mean().item() / bc2
         denom = math.sqrt(max(v_hat_mean, 0.0)) + eps
 
         raw = base_lr / (bc1 * denom)
 
         lr_min = getattr(optimizer, "lr_min", -float("inf"))
-        lr_max = getattr(optimizer, "lr_max",  float("inf"))
+        lr_max = getattr(optimizer, "lr_max", float("inf"))
         effs.append(max(lr_min, min(raw, lr_max)))
     return float(np.mean(effs)) if effs else base_lr
-
 
 
 def per_layer_effective_lr(
@@ -344,20 +365,21 @@ def per_layer_effective_lr(
     eps: float | None = None
 ) -> dict[str, float]:
     import math
+
     id2name = {id(p): n for n, p in model.named_parameters()}
-    layer_sum: dict[str, float]   = {}
-    layer_cnt: dict[str, int]     = {}
+    layer_sum: dict[str, float] = {}
+    layer_cnt: dict[str, int] = {}
 
     LR_MIN = getattr(optimizer, "lr_min", float("-inf"))
     LR_MAX = getattr(optimizer, "lr_max", float("inf"))
 
     for group in optimizer.param_groups:
-        base_lr   = float(group.get("lr", 0.0))
+        base_lr = float(group.get("lr", 0.0))
         if base_lr == 0.0:
             continue
-        g_eps     = float(group.get("eps", 1e-8) if eps is None else eps)
+        g_eps = float(group.get("eps", 1e-8) if eps is None else eps)
         beta1, beta2 = group.get("betas", (0.9, 0.999))
-        use_ams   = bool(group.get("amsgrad", False))
+        use_ams = bool(group.get("amsgrad", False))
 
         group_param_ids = {id(p) for p in group.get("params", [])}
 
@@ -372,21 +394,25 @@ def per_layer_effective_lr(
                 continue
             t = int(st.get("step", 0))
             if t < 1:
-                continue 
+                continue
 
-            v = st.get("max_exp_avg_sq") if (use_ams and "max_exp_avg_sq" in st) else st.get("exp_avg_sq")
+            v = (
+                st.get("max_exp_avg_sq")
+                if (use_ams and "max_exp_avg_sq" in st)
+                else st.get("exp_avg_sq")
+            )
             if v is None or v.numel() == 0:
                 continue
 
-            bc1 = 1.0 - (beta1 ** t)
-            bc2 = 1.0 - (beta2 ** t)
+            bc1 = 1.0 - (beta1**t)
+            bc2 = 1.0 - (beta2**t)
             if bc1 <= 0.0 or bc2 <= 0.0:
                 continue
 
             v_hat_mean = float(v.float().mean().item()) / bc2
             denom = math.sqrt(max(v_hat_mean, 0.0)) + g_eps
 
-            raw_step = base_lr / (bc1 * denom)    
+            raw_step = base_lr / (bc1 * denom)
             step_clamped = max(LR_MIN, min(raw_step, LR_MAX))
 
             name = id2name.get(id(p))
@@ -397,6 +423,7 @@ def per_layer_effective_lr(
             layer_cnt[layer] = layer_cnt.get(layer, 0) + 1
 
     return {k: (layer_sum[k] / layer_cnt[k]) for k in layer_sum}
+
 
 def per_layer_sgd_lr(
     model: torch.nn.Module,
@@ -411,7 +438,7 @@ def per_layer_sgd_lr(
 
     group = optimizer.param_groups[0]
     base_lr = float(group.get("lr", 0.0))
-    mu      = float(group.get("momentum", 0.0))
+    mu = float(group.get("momentum", 0.0))
 
     if step is None:
         inferred = 0
@@ -421,8 +448,9 @@ def per_layer_sgd_lr(
                 inferred = max(inferred, int(st["step"]))
         step = inferred if inferred > 0 else None
 
-    eff = sgd_momentum_eta_eff(base_lr, mu, step,
-                               mode=("time" if sgd_mode == "time" else "asymptotic"))
+    eff = sgd_momentum_eta_eff(
+        base_lr, mu, step, mode=("time" if sgd_mode == "time" else "asymptotic")
+    )
 
     group_param_ids = {id(q) for q in group.get("params", [])}
     for q in group.get("params", []):
@@ -436,12 +464,14 @@ def per_layer_sgd_lr(
         name = id2name.get(id(q), None)
         if name is None:
             continue
-        layer = name.split('.', 1)[0] if '.' in name else name
+        layer = name.split(".", 1)[0] if "." in name else name
         layer_lrs[layer] = eff
     return layer_lrs
 
+
 import math
 from typing import Optional, Literal
+
 
 def sgd_momentum_eta_eff(
     lr: float,
@@ -457,14 +487,11 @@ def sgd_momentum_eta_eff(
         return float(lr) / (1.0 - mu)
 
     t = max(int(step or 0), 1)
-    return float(lr) * (1.0 - (mu ** t)) / (1.0 - mu)
+    return float(lr) * (1.0 - (mu**t)) / (1.0 - mu)
 
 
 def sgd_weight_decay_factor(
-    lr: float,
-    weight_decay: float,
-    *,
-    decoupled: bool
+    lr: float, weight_decay: float, *, decoupled: bool
 ) -> float:
     lam = float(weight_decay)
     if lam <= 0.0:
@@ -476,52 +503,55 @@ def sgd_weight_decay_factor(
 
 
 class PerLayerLyapunovScheduler:
-    def __init__(self, optimizer, layer_states,
-                 safety=0.9, cool=0.999, warm=1.01, cfg=None):
-        self.opt          = optimizer
+    def __init__(
+        self, optimizer, layer_states, safety=0.9, cool=0.999, warm=1.01, cfg=None
+    ):
+        self.opt = optimizer
         self.layer_states = layer_states
         self.safety, self.cool, self.warm = cfg.safety, cool, warm
 
         self.layer2groups = {}
         for i, g in enumerate(self.opt.param_groups):
-            lyr = g.get('layer', None)
+            lyr = g.get("layer", None)
             if lyr is not None:
                 self.layer2groups.setdefault(lyr, []).append(i)
 
-    def step(self, layer: str, eff_lr: float, tau: float, current_step, total_steps) -> float:
+    def step(
+        self, layer: str, eff_lr: float, tau: float, current_step, total_steps
+    ) -> float:
         if tau == 0.0:
-            return tau 
+            return tau
         if layer not in self.layer2groups:
             return tau
 
-        lr_star = tau 
+        lr_star = tau
         if eff_lr > 0.12 and eff_lr > self.safety * lr_star:
             factor = self.cool
-        elif current_step < 0.1 * total_steps and eff_lr < 0.3 * self.safety * lr_star: 
+        elif current_step < 0.1 * total_steps and eff_lr < 0.3 * self.safety * lr_star:
             factor = self.warm
         else:
-            return lr_star            
+            return lr_star
 
         for gi in self.layer2groups[layer]:
-            self.opt.param_groups[gi]['lr'] *= factor
+            self.opt.param_groups[gi]["lr"] *= factor
         return lr_star
-        
+
+
 class GradSNR:
     def __init__(self):
         self.prev = None
 
     @torch.no_grad()
-    def update(self,
-               grad_flat: torch.Tensor,
-               eta_eff: float,
-               batch_B: int) -> tuple[float | None, float | None]:
+    def update(
+        self, grad_flat: torch.Tensor, eta_eff: float, batch_B: int
+    ) -> tuple[float | None, float | None]:
         if grad_flat is None:
             return None, None
         if self.prev is None or self.prev.numel() != grad_flat.numel():
             self.prev = grad_flat.detach().clone()
             return None, None
 
-        diff = (grad_flat - self.prev)
+        diff = grad_flat - self.prev
         sigma2_hat = 0.5 * float(diff.pow(2).sum().item())
 
         T_t = None
@@ -532,6 +562,7 @@ class GradSNR:
         self.prev = grad_flat.detach().clone()
         return T_t, sigma2_hat
 
+
 def grad_variance_within_batch(model, loss_fn, inputs, targets):
     device = inputs.device
     params = [p for p in model.parameters() if p.requires_grad]
@@ -540,36 +571,45 @@ def grad_variance_within_batch(model, loss_fn, inputs, targets):
     outputs = model(inputs)
     per_sample_losses = loss_fn(outputs, targets)
     if per_sample_losses.ndim > 1:
-        per_sample_losses = per_sample_losses.mean(dim=tuple(range(1, per_sample_losses.ndim)))
+        per_sample_losses = per_sample_losses.mean(
+            dim=tuple(range(1, per_sample_losses.ndim))
+        )
 
     B = int(per_sample_losses.shape[0])
 
     grads = []
     for i in range(B):
         loss_i = per_sample_losses[i]
-        retain = (i < B - 1)
-        gi = torch.autograd.grad(loss_i, params, retain_graph=retain, allow_unused=False)
+        retain = i < B - 1
+        gi = torch.autograd.grad(
+            loss_i, params, retain_graph=retain, allow_unused=False
+        )
         gi_flat = torch.cat([g.contiguous().view(-1) for g in gi])
         grads.append(gi_flat.detach())
 
-    G = torch.stack(grads, dim=0)  
+    G = torch.stack(grads, dim=0)
     g_bar = G.mean(dim=0)
-    sigma2 = ((G - g_bar)**2).sum(dim=1).mean().item()
+    sigma2 = ((G - g_bar) ** 2).sum(dim=1).mean().item()
 
     return sigma2
 
+
 class SNRProgressPredictor:
     def __init__(self, margin: float = 0.0, window: int = 20):
-        self.delta   = float(margin)
-        self.window  = int(window)
-        self.win     = deque(maxlen=self.window)
+        self.delta = float(margin)
+        self.window = int(window)
+        self.win = deque(maxlen=self.window)
 
-    def update(self,  T_mb: float | None, T_proxy: float | None):
-        t = T_mb if (T_mb is not None and not math.isnan(T_mb)) else (
-            T_proxy if (T_proxy is not None and not math.isnan(T_proxy)) else None
+    def update(self, T_mb: float | None, T_proxy: float | None):
+        t = (
+            T_mb
+            if (T_mb is not None and not math.isnan(T_mb))
+            else (
+                T_proxy if (T_proxy is not None and not math.isnan(T_proxy)) else None
+            )
         )
         if t is None:
-            return None, None, None, None, None 
+            return None, None, None, None, None
 
         self.win.append(float(t))
         meanT = sum(self.win) / len(self.win)
@@ -582,6 +622,7 @@ class SNRProgressPredictor:
 
         return pred, pred_real, meanT, thresh, conf
 
+
 def grad_variance_within_batch_by_layer(model, loss_fn, inputs, targets, layer_map):
     device = inputs.device
     params_all = [p for p in model.parameters() if p.requires_grad]
@@ -590,18 +631,24 @@ def grad_variance_within_batch_by_layer(model, loss_fn, inputs, targets, layer_m
     outputs = model(inputs)
     per_sample_losses = loss_fn(outputs, targets)
     if per_sample_losses.ndim > 1:
-        per_sample_losses = per_sample_losses.mean(dim=tuple(range(1, per_sample_losses.ndim)))
+        per_sample_losses = per_sample_losses.mean(
+            dim=tuple(range(1, per_sample_losses.ndim))
+        )
 
     B = int(per_sample_losses.shape[0])
 
-    layer_param_lists = {layer: [p for p in plist if p.requires_grad]
-                         for layer, plist in layer_map.items()}
+    layer_param_lists = {
+        layer: [p for p in plist if p.requires_grad]
+        for layer, plist in layer_map.items()
+    }
 
     layer_grads = {layer: [] for layer in layer_param_lists}
     for i in range(B):
         loss_i = per_sample_losses[i]
-        retain = (i < B - 1)
-        gi = torch.autograd.grad(loss_i, params_all, retain_graph=retain, allow_unused=False)
+        retain = i < B - 1
+        gi = torch.autograd.grad(
+            loss_i, params_all, retain_graph=retain, allow_unused=False
+        )
         idx = 0
         name2grad = {}
         for p in params_all:
@@ -609,7 +656,9 @@ def grad_variance_within_batch_by_layer(model, loss_fn, inputs, targets, layer_m
             name2grad[id(p)] = g
             idx += 1
         for layer, plist in layer_param_lists.items():
-            g_l = torch.cat([name2grad[id(p)].contiguous().view(-1) for p in plist], dim=0)
+            g_l = torch.cat(
+                [name2grad[id(p)].contiguous().view(-1) for p in plist], dim=0
+            )
             layer_grads[layer].append(g_l.detach())
 
     sigma2_by_layer = {}
@@ -617,7 +666,7 @@ def grad_variance_within_batch_by_layer(model, loss_fn, inputs, targets, layer_m
         if len(Glist) == 0:
             sigma2_by_layer[layer] = 0.0
             continue
-        G = torch.stack(Glist, dim=0) 
+        G = torch.stack(Glist, dim=0)
         g_bar = G.mean(dim=0)
         sigma2 = ((G - g_bar) ** 2).sum(dim=1).mean().item()
         sigma2_by_layer[layer] = float(sigma2)

@@ -17,6 +17,8 @@ from datasets import data_loader
 from utils.optimizers import PerLayerLyapunovScheduler
 
 activations = {}
+
+
 def compute_use_for_activation(h):
     with torch.no_grad():
         pos = (h > 0).float().mean(dim=0)
@@ -24,22 +26,27 @@ def compute_use_for_activation(h):
         ent = -(pos * (pos + eps).log() + (1 - pos) * (1 - pos + eps).log())
         return ent.mean().item()
 
+
 def save_activations(name):
     def hook(m, inp, out):
         activations[name] = out
 
     return hook
 
+
 parser = get_parser()
 config = parser.parse_args()
-if not hasattr(config, "snr_margin"):       config.snr_margin = 0.0
-if not hasattr(config, "snr_pred_window"):  config.snr_pred_window = 20
+if not hasattr(config, "snr_margin"):
+    config.snr_margin = 0.0
+if not hasattr(config, "snr_pred_window"):
+    config.snr_pred_window = 20
 LENGTH_CHOICES = [100, 300, 50, 150]
 
 rho = config.sam_rho
 device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
-noise_power_full   = 0.0
-noise_power_mb     = 0.0
+noise_power_full = 0.0
+noise_power_mb = 0.0
+
 
 def set_seed(s):
     random.seed(s)
@@ -48,11 +55,15 @@ def set_seed(s):
     if torch.cuda.is_available():
         torch.cuda.manual_seed(s)
         torch.cuda.manual_seed_all(s)
+
+
 set_seed(config.seed)
 
 task_lengths = [random.choice(LENGTH_CHOICES) for _ in range(config.runs)]
 
-train_dataset, test_dataset, in_ch, input_size, DATA_MEAN, DATA_STD = data_loader.get_dataset(config)
+train_dataset, test_dataset, in_ch, input_size, DATA_MEAN, DATA_STD = (
+    data_loader.get_dataset(config)
+)
 
 config.alpha = 0.01 if config.activation == "leaky_relu" else config.alpha
 hidden = 256
@@ -78,11 +89,13 @@ if config.reg == "wass":
 
 activations = {}
 
+
 def save_activations(name):
     def hook(m, inp, out):
         activations[name] = out
 
     return hook
+
 
 if config.model in [
     "MLP",
@@ -97,23 +110,28 @@ if config.model in [
 else:
     model.fc1.register_forward_hook(save_activations("l1"))
 
+
 def make_layer_groups(model, base_lr):
     layer_map = {}
     for name, p in model.named_parameters():
         if p.requires_grad:
-            layer = name.split('.')[0]
+            layer = name.split(".")[0]
             layer_map.setdefault(layer, []).append(p)
-    layer_groups = [{'params': params, 'lr': base_lr, 'layer': layer}
-                    for layer, params in layer_map.items()]
+    layer_groups = [
+        {"params": params, "lr": base_lr, "layer": layer}
+        for layer, params in layer_map.items()
+    ]
     return layer_map, layer_groups
+
+
 layer_map, layer_groups = make_layer_groups(model, config.lr)
 # ── one EMAState per layer ─────────────────────────────────────────────
 layer_states = {
-    layer : misc.EMAState(alphas=(0.01, 0.05, 0.5))   # same alphas you used globally
+    layer: misc.EMAState(alphas=(0.01, 0.05, 0.5))  # same alphas you used globally
     for layer in layer_map
 }
 act_layer_states = {
-    layer : misc.EMAState(alphas=(0.01, 0.05, 0.5))   # same alphas you used globally
+    layer: misc.EMAState(alphas=(0.01, 0.05, 0.5))  # same alphas you used globally
     for layer in layer_map
 }
 
@@ -121,11 +139,17 @@ criterion = nn.CrossEntropyLoss(reduction="mean")
 criterion_nored = nn.CrossEntropyLoss(reduction="none")  # for within-batch σ² only
 wd = config.l2_lambda if config.reg == "l2" else 0.0
 if config.optimizer == "adam":
-    optimizer = optim.Adam(layer_groups, lr=config.lr, weight_decay=wd, betas=(0.9, config.beta2))
-elif config.optimizer == "sgd": 
-    optimizer = torch.optim.SGD(layer_groups, lr=config.lr, weight_decay=wd, momentum=0.9)
+    optimizer = optim.Adam(
+        layer_groups, lr=config.lr, weight_decay=wd, betas=(0.9, config.beta2)
+    )
+elif config.optimizer == "sgd":
+    optimizer = torch.optim.SGD(
+        layer_groups, lr=config.lr, weight_decay=wd, momentum=0.9
+    )
 elif config.optimizer == "clamped_adam":
-    optimizer = optimizers.ClampedAdam(layer_groups, lr=config.lr, lr_min=1e-3, lr_max=1.1)
+    optimizer = optimizers.ClampedAdam(
+        layer_groups, lr=config.lr, lr_min=1e-3, lr_max=1.1
+    )
 #
 # base_optimizer = optimizer
 # optimizer = optimizers.CVSharpnessController(
@@ -156,26 +180,26 @@ run = wandb.init(
         "wass_lambda": config.wass_lambda,
     },
 )
-wandb.define_metric("gradient_noise",   hidden=False)
-wandb.define_metric("gradient_noise_mb",hidden=False)
-wandb.define_metric("true_grad_norm_sq",hidden=False)
-wandb.define_metric("task_lam_var",     hidden=False)
+wandb.define_metric("gradient_noise", hidden=False)
+wandb.define_metric("gradient_noise_mb", hidden=False)
+wandb.define_metric("true_grad_norm_sq", hidden=False)
+wandb.define_metric("task_lam_var", hidden=False)
 # SNR metrics
 wandb.define_metric("snr_T", hidden=False)
 wandb.define_metric("snr_sigma2_hat", hidden=False)
 wandb.define_metric("mb_sigma2_hat", hidden=False)
-wandb.define_metric("mb_snr_T",      hidden=False)
+wandb.define_metric("mb_snr_T", hidden=False)
 
 # tracker and series for plotting later
 snr_tracker = optimizers.GradSNR()
-snr_T_series = []          # list of (update_idx, T_t)
+snr_T_series = []  # list of (update_idx, T_t)
 snr_predictor = optimizers.SNRProgressPredictor(
     margin=config.snr_margin, window=config.snr_pred_window
 )
-wandb.define_metric("snr_pred",        hidden=False)
-wandb.define_metric("snr_pred_conf",   hidden=True)
-wandb.define_metric("snr_T_mean",      hidden=True)
-wandb.define_metric("snr_T_thresh",    hidden=True)
+wandb.define_metric("snr_pred", hidden=False)
+wandb.define_metric("snr_pred_conf", hidden=True)
+wandb.define_metric("snr_T_mean", hidden=True)
+wandb.define_metric("snr_T_thresh", hidden=True)
 
 results = {
     config.activation: {
@@ -187,12 +211,12 @@ results = {
     }
 }
 
-sharp_state  = misc.EMAState(alphas=(0.01, 0.05, 0.5))
-r_sharp_state = misc.EMAState(alphas=(0.01,0.05,0.5))
+sharp_state = misc.EMAState(alphas=(0.01, 0.05, 0.5))
+r_sharp_state = misc.EMAState(alphas=(0.01, 0.05, 0.5))
 lambda_state = misc.EMAState(alphas=(0.01, 0.05, 0.5))
 
 init_sigma_min = {}
-print_val = 0.
+print_val = 0.0
 for name, p in model.named_parameters():
     if p.requires_grad and p.ndim >= 2:
         # 1–3 inverse-power iterations are plenty at t=0
@@ -259,19 +283,34 @@ for task in range(config.runs):
         else:
             model = mlp.BatchNormMLP(input_size, hidden, 10).to(device)
         if config.optimizer == "adam":
-            optimizer = optim.Adam(model.parameters(), lr=config.lr, weight_decay=wd, betas=(config.beta1, config.beta2))
+            optimizer = optim.Adam(
+                model.parameters(),
+                lr=config.lr,
+                weight_decay=wd,
+                betas=(config.beta1, config.beta2),
+            )
         elif config.optimizer == "sgd":
-            optimizer = optim.SGD(layer_groups, lr=config.lr, weight_decay=wd, momentum=0.9)
+            optimizer = optim.SGD(
+                layer_groups, lr=config.lr, weight_decay=wd, momentum=0.9
+            )
     if config.reset_optimizer:
         layer_map, layer_groups = make_layer_groups(model, config.lr)
         # Recreate optimizer using layer_groups (not model.parameters())
         if config.optimizer == "adam":
-            optimizer = optim.Adam(layer_groups, lr=config.lr, weight_decay=wd, betas=(config.beta1, config.beta2))
+            optimizer = optim.Adam(
+                layer_groups,
+                lr=config.lr,
+                weight_decay=wd,
+                betas=(config.beta1, config.beta2),
+            )
         elif config.optimizer == "sgd":
-            optimizer = optim.SGD(layer_groups, lr=config.lr, weight_decay=wd, momentum=0.9)
+            optimizer = optim.SGD(
+                layer_groups, lr=config.lr, weight_decay=wd, momentum=0.9
+            )
         elif config.optimizer == "clamped_adam":
-            optimizer = optimizers.ClampedAdam(layer_groups, lr=config.lr, lr_min=1e-2, lr_max=0.8)
-
+            optimizer = optimizers.ClampedAdam(
+                layer_groups, lr=config.lr, lr_min=1e-2, lr_max=0.8
+            )
 
     if config.dataset == "PermutedMNIST":
         perm_tf = make_perm_tf(task)
@@ -302,7 +341,9 @@ for task in range(config.runs):
 
     total_updates = 0
     if total_updates % config.log_interval == 0:
-        hessian_rank = optimizers.empirical_fischer_rank(model, train_dataset, device, cfg=config)
+        hessian_rank = optimizers.empirical_fischer_rank(
+            model, train_dataset, device, cfg=config
+        )
 
     model.train()
     ly_sched = None
@@ -324,9 +365,7 @@ for task in range(config.runs):
             optimizer, step_size=config.step_size, gamma=config.gamma
         )
     elif config.lr_schedule == "exponential":
-        scheduler = optim.lr_scheduler.ExponentialLR(
-            optimizer, gamma=config.gamma
-        )
+        scheduler = optim.lr_scheduler.ExponentialLR(optimizer, gamma=config.gamma)
     elif config.lr_schedule == "polynomial":
         scheduler = optim.lr_scheduler.LambdaLR(
             optimizer,
@@ -337,32 +376,42 @@ for task in range(config.runs):
             optimizer, T_0=config.epochs
         )
     elif config.lr_schedule == "wsd":
-        scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=schedulers.wsd_lambda)
+        scheduler = optim.lr_scheduler.LambdaLR(
+            optimizer, lr_lambda=schedulers.wsd_lambda
+        )
     elif config.lr_schedule == "power":
-        scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=schedulers.power_lambda)
+        scheduler = optim.lr_scheduler.LambdaLR(
+            optimizer, lr_lambda=schedulers.power_lambda
+        )
     elif config.lr_schedule == "skew":
-        scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=schedulers.skew_lambda)
+        scheduler = optim.lr_scheduler.LambdaLR(
+            optimizer, lr_lambda=schedulers.skew_lambda
+        )
     elif config.lr_schedule == "lyapunov":
         # hyper-params exposed to the CLI for convenience
         ly_safety = config.safety
-        ly_cool   = config.cool
-        ly_warm   = config.warm
-        ly_sched  = optimizers.LyapunovScheduler(optimizer,
-                                    ema_state = sharp_state,   # <<– share!
-                                    safety    = ly_safety,
-                                    cool      = ly_cool,
-                                    warm      = ly_warm,
-                                    cfg = config)
+        ly_cool = config.cool
+        ly_warm = config.warm
+        ly_sched = optimizers.LyapunovScheduler(
+            optimizer,
+            ema_state=sharp_state,  # <<– share!
+            safety=ly_safety,
+            cool=ly_cool,
+            warm=ly_warm,
+            cfg=config,
+        )
         scheduler = None
     elif config.lr_schedule == "pl_lyapunov":
         pl_scheduler = PerLayerLyapunovScheduler(
-            optimizer    = optimizer,
-            layer_states = {layer: layer_states.get(layer, misc.EMAState(alphas=(0.01,0.05,0.5)))
-                            for layer in layer_map},
-            safety       = config.safety,
-            cool         = config.cool,
-            warm         = config.warm,
-            cfg = config
+            optimizer=optimizer,
+            layer_states={
+                layer: layer_states.get(layer, misc.EMAState(alphas=(0.01, 0.05, 0.5)))
+                for layer in layer_map
+            },
+            safety=config.safety,
+            cool=config.cool,
+            warm=config.warm,
+            cfg=config,
         )
     else:
         scheduler = None
@@ -380,7 +429,7 @@ for task in range(config.runs):
             else:
                 inputs = x.view(x.size(0), -1).to(device)
             labels = y.to(device)
-            
+
             optimizer.zero_grad()
             out = model(inputs)
             preds = out.argmax(dim=1)
@@ -401,7 +450,10 @@ for task in range(config.runs):
             elif config.reg == "spectral":
                 for n, p in model.named_parameters():
                     if p.requires_grad and p.ndim >= 2:
-                        reg += (optimizers.power_iteration(p, 1).pow(config.spectral_k) - 1.0).pow(2)
+                        reg += (
+                            optimizers.power_iteration(p, 1).pow(config.spectral_k)
+                            - 1.0
+                        ).pow(2)
                 reg *= config.spectral_lambda
             elif config.reg == "ortho":
                 frac = config.ortho_frac
@@ -409,15 +461,17 @@ for task in range(config.runs):
                     if p.ndim < 2 or not p.requires_grad:
                         continue
                     if total_updates % config.ortho_interval == 0:
-                        sigma_now = optimizers.power_iteration_sigma_min(p, iters=1).detach()
+                        sigma_now = optimizers.power_iteration_sigma_min(
+                            p, iters=1
+                        ).detach()
                         cached_sigma_min[name] = sigma_now
                     else:
                         sigma_now = cached_sigma_min.get(
                             name,
-                            optimizers.power_iteration_sigma_min(p, iters=1).detach()
+                            optimizers.power_iteration_sigma_min(p, iters=1).detach(),
                         )
                     target = frac * init_sigma_min[name]
-                    reg   += (sigma_now - target).pow(2)
+                    reg += (sigma_now - target).pow(2)
                 reg *= config.ortho_lambda
             elif config.reg == "orthofrob":
                 for name, p in model.named_parameters():
@@ -427,7 +481,7 @@ for task in range(config.runs):
                         I = torch.eye(k, device=W.device, dtype=W.dtype)
                         reg += (W.t() @ W - I).pow(2).sum()
                 reg *= config.ortho_lambda
-            
+
             loss = base + reg
             params = [p for p in model.parameters() if p.requires_grad]
             old = [p.data.clone() for p in params]
@@ -442,211 +496,209 @@ for task in range(config.runs):
             #     trace_val = optimizers.hessian_trace(loss, params, n_samples=10)
 
             if total_updates % config.log_interval == 0:
-            #     if config.optimizer == "adam":
-            #         layer_eff_lrs = optimizers.per_layer_effective_lr(model, optimizer)
-            #     else:  # SGD (+ momentum)
-            #         layer_eff_lrs = optimizers.per_layer_sgd_lr(
-            #             model, optimizer, step=total_updates, sgd_mode="time"
-            #         )
+                #     if config.optimizer == "adam":
+                #         layer_eff_lrs = optimizers.per_layer_effective_lr(model, optimizer)
+                #     else:  # SGD (+ momentum)
+                #         layer_eff_lrs = optimizers.per_layer_sgd_lr(
+                #             model, optimizer, step=total_updates, sgd_mode="time"
+                #         )
 
+                #     layer_sigma2_mb = optimizers.grad_variance_within_batch_by_layer(
+                #         model, criterion_nored, inputs, labels, layer_map
+                #     )
 
-            #     layer_sigma2_mb = optimizers.grad_variance_within_batch_by_layer(
-            #         model, criterion_nored, inputs, labels, layer_map
-            #     )
+                #     # union across layers for collapse_pred (NO pred2)
+                #     union_pred_step = 0
+                #     union_eff_gt_acrit_step_scv1 = 0
+                #     union_eff_gt_acrit_step_ss1 = 0
+                #     union_eff_gt_acrit_step_svar1 = 0
+                #     union_eff_gt_acrit_step_scv10 = 0
+                #     union_eff_gt_acrit_step_ss10 = 0
+                #     union_eff_gt_acrit_step_svar10 = 0
+                #     union_eff_gt_acrit_step_sqm1 = 0
+                #     union_eff_gt_acrit_step_sqm10 = 0
+                #     union_eff_gt_acrit_step_rcv1 = 0
+                #     union_eff_gt_acrit_step_rs1 = 0
+                #     union_eff_gt_acrit_step_rvar1 = 0
+                #     union_eff_gt_acrit_step_rsqm1 = 0
+                #     union_eff_gt_acrit_step_rcv10 = 0
+                #     union_eff_gt_acrit_step_rs10 = 0
+                #     union_eff_gt_acrit_step_rvar10 = 0
+                #     union_eff_gt_acrit_step_rsqm10 = 0
 
-            #     # union across layers for collapse_pred (NO pred2)
-            #     union_pred_step = 0
-            #     union_eff_gt_acrit_step_scv1 = 0
-            #     union_eff_gt_acrit_step_ss1 = 0
-            #     union_eff_gt_acrit_step_svar1 = 0
-            #     union_eff_gt_acrit_step_scv10 = 0
-            #     union_eff_gt_acrit_step_ss10 = 0
-            #     union_eff_gt_acrit_step_svar10 = 0
-            #     union_eff_gt_acrit_step_sqm1 = 0
-            #     union_eff_gt_acrit_step_sqm10 = 0
-            #     union_eff_gt_acrit_step_rcv1 = 0
-            #     union_eff_gt_acrit_step_rs1 = 0
-            #     union_eff_gt_acrit_step_rvar1 = 0
-            #     union_eff_gt_acrit_step_rsqm1 = 0
-            #     union_eff_gt_acrit_step_rcv10 = 0
-            #     union_eff_gt_acrit_step_rs10 = 0
-            #     union_eff_gt_acrit_step_rvar10 = 0
-            #     union_eff_gt_acrit_step_rsqm10 = 0
+                #     for layer, params in layer_map.items():
+                #         lam = optimizers.estimate_hessian_topk(model, loss, params, k=1)[0]
+                #         norm_lam = optimizers.get_norm_sharpness(optimizer, lam, config)
+                #         eff_lr = layer_eff_lrs.get(layer, optimizer.param_groups[0]["lr"])
+                #         state, scalars = misc.update_stat(norm_lam, layer_states[layer], eff_lr)
+                #         act_state, act_scalars = misc.update_stat(lam, act_layer_states[layer], eff_lr)
 
-            #     for layer, params in layer_map.items():
-            #         lam = optimizers.estimate_hessian_topk(model, loss, params, k=1)[0]
-            #         norm_lam = optimizers.get_norm_sharpness(optimizer, lam, config)
-            #         eff_lr = layer_eff_lrs.get(layer, optimizer.param_groups[0]["lr"])
-            #         state, scalars = misc.update_stat(norm_lam, layer_states[layer], eff_lr)
-            #         act_state, act_scalars = misc.update_stat(lam, act_layer_states[layer], eff_lr)
+                #         # strictly use collapse_pred for the union
+                #         layer_pred = int(scalars["collapse_pred2"])
+                #         union_pred_step = max(union_pred_step, layer_pred)
 
-            #         # strictly use collapse_pred for the union
-            #         layer_pred = int(scalars["collapse_pred2"])
-            #         union_pred_step = max(union_pred_step, layer_pred)
+                #         # ---- per-layer alpha_crit_s (unchanged) ----
+                #         gi = torch.autograd.grad(loss, params, retain_graph=True, allow_unused=False)
+                #         g_layer_sq = float(torch.cat([g.contiguous().view(-1) for g in gi]).pow(2).sum().item())
 
-            #         # ---- per-layer alpha_crit_s (unchanged) ----
-            #         gi = torch.autograd.grad(loss, params, retain_graph=True, allow_unused=False)
-            #         g_layer_sq = float(torch.cat([g.contiguous().view(-1) for g in gi]).pow(2).sum().item())
+                #         sigma2_l = float(layer_sigma2_mb.get(layer, 0.0))
+                #         s_scv_sigma2_l1 = sigma2_l + 10.0 * g_layer_sq * scalars["lam_cv"]
+                #         s_ss_sigma2_l1 = sigma2_l + 10.0 * g_layer_sq * norm_lam
+                #         s_svar_sigma2_l1 = sigma2_l + 10.0 * g_layer_sq * scalars["lam_var"]
+                #         s_sqm_sigma2_l1 = sigma2_l + 75.0 * g_layer_sq * scalars["sq_mean"]
+                #         s_scv_sigma2_l10 = sigma2_l + 20.0 * g_layer_sq * scalars["lam_cv"]
+                #         s_ss_sigma2_l10 = sigma2_l + 20.0 * g_layer_sq * norm_lam
+                #         s_svar_sigma2_l10 = sigma2_l + 20.0 * g_layer_sq * scalars["lam_var"]
+                #         s_sqm_sigma2_l10 = sigma2_l + 20.0 * g_layer_sq * scalars["sq_mean"]
+                #         # actual sharpness metric
+                #         s_rcv_sigma2_l1 = sigma2_l + 10.0 * g_layer_sq * act_scalars["lam_cv"]
+                #         s_rs_sigma2_l1 = sigma2_l + 10.0 * g_layer_sq * lam
+                #         s_rvar_sigma2_l1 = sigma2_l + 10.0 * g_layer_sq * act_scalars["lam_var"]
+                #         s_rsqm_sigma2_l1 = sigma2_l + 75.0 * g_layer_sq * act_scalars["sq_mean"]
+                #         s_rcv_sigma2_l10 = sigma2_l + 20.0 * g_layer_sq * act_scalars["lam_cv"]
+                #         s_rs_sigma2_l10 = sigma2_l + 20.0 * g_layer_sq * lam
+                #         s_rvar_sigma2_l10 = sigma2_l + 20.0 * g_layer_sq * act_scalars["lam_var"]
+                #         s_rsqm_sigma2_l10 = sigma2_l + 20.0 * g_layer_sq * act_scalars["sq_mean"]
 
-            #         sigma2_l = float(layer_sigma2_mb.get(layer, 0.0))
-            #         s_scv_sigma2_l1 = sigma2_l + 10.0 * g_layer_sq * scalars["lam_cv"]
-            #         s_ss_sigma2_l1 = sigma2_l + 10.0 * g_layer_sq * norm_lam
-            #         s_svar_sigma2_l1 = sigma2_l + 10.0 * g_layer_sq * scalars["lam_var"]
-            #         s_sqm_sigma2_l1 = sigma2_l + 75.0 * g_layer_sq * scalars["sq_mean"]
-            #         s_scv_sigma2_l10 = sigma2_l + 20.0 * g_layer_sq * scalars["lam_cv"]
-            #         s_ss_sigma2_l10 = sigma2_l + 20.0 * g_layer_sq * norm_lam
-            #         s_svar_sigma2_l10 = sigma2_l + 20.0 * g_layer_sq * scalars["lam_var"]
-            #         s_sqm_sigma2_l10 = sigma2_l + 20.0 * g_layer_sq * scalars["sq_mean"]
-            #         # actual sharpness metric
-            #         s_rcv_sigma2_l1 = sigma2_l + 10.0 * g_layer_sq * act_scalars["lam_cv"]
-            #         s_rs_sigma2_l1 = sigma2_l + 10.0 * g_layer_sq * lam
-            #         s_rvar_sigma2_l1 = sigma2_l + 10.0 * g_layer_sq * act_scalars["lam_var"]
-            #         s_rsqm_sigma2_l1 = sigma2_l + 75.0 * g_layer_sq * act_scalars["sq_mean"]
-            #         s_rcv_sigma2_l10 = sigma2_l + 20.0 * g_layer_sq * act_scalars["lam_cv"]
-            #         s_rs_sigma2_l10 = sigma2_l + 20.0 * g_layer_sq * lam
-            #         s_rvar_sigma2_l10 = sigma2_l + 20.0 * g_layer_sq * act_scalars["lam_var"]
-            #         s_rsqm_sigma2_l10 = sigma2_l + 20.0 * g_layer_sq * act_scalars["sq_mean"]
+                #         r = (sigma2_l / max(1, inputs.size(0))) / (g_layer_sq + 1e-12) + 1e-12
+                #         eta_crit = min(0.8/r, 2/(norm_lam * (1 + r)))
 
-            #         r = (sigma2_l / max(1, inputs.size(0))) / (g_layer_sq + 1e-12) + 1e-12
-            #         eta_crit = min(0.8/r, 2/(norm_lam * (1 + r)))
+                #         B = int(inputs.size(0))
+                #         alpha_crit_scv_layer1 = (B * g_layer_sq) / max(s_scv_sigma2_l1, 1e-12)
+                #         alpha_crit_ss_layer1 = (B * g_layer_sq) / max(s_ss_sigma2_l1, 1e-12)
+                #         alpha_crit_svar_layer1 = (B * g_layer_sq) / max(s_svar_sigma2_l1, 1e-12)
+                #         alpha_crit_sqm_layer1 = (B * g_layer_sq) / max(s_sqm_sigma2_l1, 1e-12)
+                #         alpha_crit_scv_layer10 = (B * g_layer_sq) / max(s_scv_sigma2_l10, 1e-12)
+                #         alpha_crit_ss_layer10 = (B * g_layer_sq) / max(s_ss_sigma2_l10, 1e-12)
+                #         alpha_crit_svar_layer10 = (B * g_layer_sq) / max(s_svar_sigma2_l10, 1e-12)
+                #         alpha_crit_sqm_layer10 = (B * g_layer_sq) / max(s_sqm_sigma2_l10, 1e-12)
+                #         alpha_crit_rcv_layer1 = (B * g_layer_sq) / max(s_rcv_sigma2_l1, 1e-12)
+                #         alpha_crit_rs_layer1 = (B * g_layer_sq) / max(s_rs_sigma2_l1, 1e-12)
+                #         alpha_crit_rvar_layer1 = (B * g_layer_sq) / max(s_rvar_sigma2_l1, 1e-12)
+                #         alpha_crit_rsqm_layer1 = (B * g_layer_sq) / max(s_rsqm_sigma2_l1, 1e-12)
+                #         alpha_crit_rcv_layer10 = (B * g_layer_sq) / max(s_rcv_sigma2_l10, 1e-12)
+                #         alpha_crit_rs_layer10 = (B * g_layer_sq) / max(s_rs_sigma2_l10, 1e-12)
+                #         alpha_crit_rvar_layer10 = (B * g_layer_sq) / max(s_rvar_sigma2_l10, 1e-12)
+                #         alpha_crit_rsqm_layer10 = (B * g_layer_sq) / max(s_rsqm_sigma2_l10, 1e-12)
+                #         eff_gt_acrit_scv1 = int(eff_lr > alpha_crit_scv_layer1)
+                #         eff_gt_acrit_ss1 = int(eff_lr > alpha_crit_ss_layer1)
+                #         eff_gt_acrit_svar1 = int(eff_lr > alpha_crit_svar_layer1)
+                #         eff_gt_acrit_sqm1 = int(eff_lr > alpha_crit_sqm_layer1)
+                #         eff_gt_acrit_scv10 = int(eff_lr > alpha_crit_scv_layer10)
+                #         eff_gt_acrit_ss10 = int(eff_lr > alpha_crit_ss_layer10)
+                #         eff_gt_acrit_svar10 = int(eff_lr > alpha_crit_svar_layer10)
+                #         eff_gt_acrit_sqm10 = int(eff_lr > alpha_crit_sqm_layer10)
+                #         eff_gt_acrit_rcv1 = int(eff_lr > alpha_crit_rcv_layer1)
+                #         eff_gt_acrit_rs1 = int(eff_lr > alpha_crit_rs_layer1)
+                #         eff_gt_acrit_rvar1 = int(eff_lr > alpha_crit_rvar_layer1)
+                #         eff_gt_acrit_rsqm1 = int(eff_lr > alpha_crit_rsqm_layer1)
+                #         eff_gt_acrit_rcv10 = int(eff_lr > alpha_crit_rcv_layer10)
+                #         eff_gt_acrit_rs10 = int(eff_lr > alpha_crit_rs_layer10)
+                #         eff_gt_acrit_rvar10 = int(eff_lr > alpha_crit_rvar_layer10)
+                #         eff_gt_acrit_rsqm10 = int(eff_lr > alpha_crit_rsqm_layer10)
 
-            #         B = int(inputs.size(0))
-            #         alpha_crit_scv_layer1 = (B * g_layer_sq) / max(s_scv_sigma2_l1, 1e-12)
-            #         alpha_crit_ss_layer1 = (B * g_layer_sq) / max(s_ss_sigma2_l1, 1e-12)
-            #         alpha_crit_svar_layer1 = (B * g_layer_sq) / max(s_svar_sigma2_l1, 1e-12)
-            #         alpha_crit_sqm_layer1 = (B * g_layer_sq) / max(s_sqm_sigma2_l1, 1e-12)
-            #         alpha_crit_scv_layer10 = (B * g_layer_sq) / max(s_scv_sigma2_l10, 1e-12)
-            #         alpha_crit_ss_layer10 = (B * g_layer_sq) / max(s_ss_sigma2_l10, 1e-12)
-            #         alpha_crit_svar_layer10 = (B * g_layer_sq) / max(s_svar_sigma2_l10, 1e-12)
-            #         alpha_crit_sqm_layer10 = (B * g_layer_sq) / max(s_sqm_sigma2_l10, 1e-12)
-            #         alpha_crit_rcv_layer1 = (B * g_layer_sq) / max(s_rcv_sigma2_l1, 1e-12)
-            #         alpha_crit_rs_layer1 = (B * g_layer_sq) / max(s_rs_sigma2_l1, 1e-12)
-            #         alpha_crit_rvar_layer1 = (B * g_layer_sq) / max(s_rvar_sigma2_l1, 1e-12)
-            #         alpha_crit_rsqm_layer1 = (B * g_layer_sq) / max(s_rsqm_sigma2_l1, 1e-12)
-            #         alpha_crit_rcv_layer10 = (B * g_layer_sq) / max(s_rcv_sigma2_l10, 1e-12)
-            #         alpha_crit_rs_layer10 = (B * g_layer_sq) / max(s_rs_sigma2_l10, 1e-12)
-            #         alpha_crit_rvar_layer10 = (B * g_layer_sq) / max(s_rvar_sigma2_l10, 1e-12)
-            #         alpha_crit_rsqm_layer10 = (B * g_layer_sq) / max(s_rsqm_sigma2_l10, 1e-12)
-            #         eff_gt_acrit_scv1 = int(eff_lr > alpha_crit_scv_layer1)
-            #         eff_gt_acrit_ss1 = int(eff_lr > alpha_crit_ss_layer1)
-            #         eff_gt_acrit_svar1 = int(eff_lr > alpha_crit_svar_layer1)
-            #         eff_gt_acrit_sqm1 = int(eff_lr > alpha_crit_sqm_layer1)
-            #         eff_gt_acrit_scv10 = int(eff_lr > alpha_crit_scv_layer10)
-            #         eff_gt_acrit_ss10 = int(eff_lr > alpha_crit_ss_layer10)
-            #         eff_gt_acrit_svar10 = int(eff_lr > alpha_crit_svar_layer10)
-            #         eff_gt_acrit_sqm10 = int(eff_lr > alpha_crit_sqm_layer10)
-            #         eff_gt_acrit_rcv1 = int(eff_lr > alpha_crit_rcv_layer1)
-            #         eff_gt_acrit_rs1 = int(eff_lr > alpha_crit_rs_layer1)
-            #         eff_gt_acrit_rvar1 = int(eff_lr > alpha_crit_rvar_layer1)
-            #         eff_gt_acrit_rsqm1 = int(eff_lr > alpha_crit_rsqm_layer1)
-            #         eff_gt_acrit_rcv10 = int(eff_lr > alpha_crit_rcv_layer10)
-            #         eff_gt_acrit_rs10 = int(eff_lr > alpha_crit_rs_layer10)
-            #         eff_gt_acrit_rvar10 = int(eff_lr > alpha_crit_rvar_layer10)
-            #         eff_gt_acrit_rsqm10 = int(eff_lr > alpha_crit_rsqm_layer10)
+                #         union_eff_gt_acrit_step_scv1 = max(union_eff_gt_acrit_step_scv1, eff_gt_acrit_scv1)
+                #         union_eff_gt_acrit_step_ss1 = max(union_eff_gt_acrit_step_ss1, eff_gt_acrit_ss1)
+                #         union_eff_gt_acrit_step_svar1 = max(union_eff_gt_acrit_step_svar1, eff_gt_acrit_svar1)
+                #         union_eff_gt_acrit_step_sqm1 = max(union_eff_gt_acrit_step_sqm1, eff_gt_acrit_sqm1)
+                #         union_eff_gt_acrit_step_scv10 = max(union_eff_gt_acrit_step_scv10, eff_gt_acrit_scv10)
+                #         union_eff_gt_acrit_step_ss10 = max(union_eff_gt_acrit_step_ss10, eff_gt_acrit_ss10)
+                #         union_eff_gt_acrit_step_svar10 = max(union_eff_gt_acrit_step_svar10, eff_gt_acrit_svar10)
+                #         union_eff_gt_acrit_step_sqm10 = max(union_eff_gt_acrit_step_sqm10, eff_gt_acrit_sqm10)
+                #         union_eff_gt_acrit_step_rcv1 = max(union_eff_gt_acrit_step_rcv1, eff_gt_acrit_rcv1)
+                #         union_eff_gt_acrit_step_rs1 = max(union_eff_gt_acrit_step_rs1, eff_gt_acrit_rs1)
+                #         union_eff_gt_acrit_step_rvar1 = max(union_eff_gt_acrit_step_rvar1, eff_gt_acrit_rvar1)
+                #         union_eff_gt_acrit_step_rsqm1 = max(union_eff_gt_acrit_step_rsqm1, eff_gt_acrit_rsqm1)
+                #         union_eff_gt_acrit_step_rcv10 = max(union_eff_gt_acrit_step_rcv10, eff_gt_acrit_rcv10)
+                #         union_eff_gt_acrit_step_rs10 = max(union_eff_gt_acrit_step_rs10, eff_gt_acrit_rs10)
+                #         union_eff_gt_acrit_step_rvar10 = max(union_eff_gt_acrit_step_rvar10, eff_gt_acrit_rvar10)
+                #         union_eff_gt_acrit_step_rsqm10 = max(union_eff_gt_acrit_step_rsqm10, eff_gt_acrit_rsqm10)
 
-            #         union_eff_gt_acrit_step_scv1 = max(union_eff_gt_acrit_step_scv1, eff_gt_acrit_scv1)
-            #         union_eff_gt_acrit_step_ss1 = max(union_eff_gt_acrit_step_ss1, eff_gt_acrit_ss1)
-            #         union_eff_gt_acrit_step_svar1 = max(union_eff_gt_acrit_step_svar1, eff_gt_acrit_svar1)
-            #         union_eff_gt_acrit_step_sqm1 = max(union_eff_gt_acrit_step_sqm1, eff_gt_acrit_sqm1)
-            #         union_eff_gt_acrit_step_scv10 = max(union_eff_gt_acrit_step_scv10, eff_gt_acrit_scv10)
-            #         union_eff_gt_acrit_step_ss10 = max(union_eff_gt_acrit_step_ss10, eff_gt_acrit_ss10)
-            #         union_eff_gt_acrit_step_svar10 = max(union_eff_gt_acrit_step_svar10, eff_gt_acrit_svar10)
-            #         union_eff_gt_acrit_step_sqm10 = max(union_eff_gt_acrit_step_sqm10, eff_gt_acrit_sqm10)
-            #         union_eff_gt_acrit_step_rcv1 = max(union_eff_gt_acrit_step_rcv1, eff_gt_acrit_rcv1)
-            #         union_eff_gt_acrit_step_rs1 = max(union_eff_gt_acrit_step_rs1, eff_gt_acrit_rs1)
-            #         union_eff_gt_acrit_step_rvar1 = max(union_eff_gt_acrit_step_rvar1, eff_gt_acrit_rvar1)
-            #         union_eff_gt_acrit_step_rsqm1 = max(union_eff_gt_acrit_step_rsqm1, eff_gt_acrit_rsqm1)
-            #         union_eff_gt_acrit_step_rcv10 = max(union_eff_gt_acrit_step_rcv10, eff_gt_acrit_rcv10)
-            #         union_eff_gt_acrit_step_rs10 = max(union_eff_gt_acrit_step_rs10, eff_gt_acrit_rs10)
-            #         union_eff_gt_acrit_step_rvar10 = max(union_eff_gt_acrit_step_rvar10, eff_gt_acrit_rvar10)
-            #         union_eff_gt_acrit_step_rsqm10 = max(union_eff_gt_acrit_step_rsqm10, eff_gt_acrit_rsqm10)
+                #         wandb.log({
+                #             f"{layer}/sharp"       : norm_lam,
+                #             f"{layer}/mu"          : scalars["lam_mean"],
+                #             f"{layer}/tau"         : scalars["tau"],
+                #             f"{layer}/cv"          : scalars["lam_cv"],
+                #             f"{layer}/eff_lr"      : eff_lr,
+                #             f"{layer}/predict"     : layer_pred,
+                #             # f"{layer}/alpha_crit_s": float(alpha_crit_s_layer),
+                #             f"{layer}/alpha_crit_scv1": float(alpha_crit_scv_layer1),
+                #             f"{layer}/alpha_crit_ss1": float(alpha_crit_ss_layer1),
+                #             f"{layer}/alpha_crit_svar1": float(alpha_crit_svar_layer1),
+                #             f"{layer}/alpha_crit_scv10": float(alpha_crit_scv_layer10),
+                #             f"{layer}/alpha_crit_ss10": float(alpha_crit_ss_layer10),
+                #             f"{layer}/alpha_crit_svar10": float(alpha_crit_svar_layer10),
+                #             f"{layer}/alpha_crit_sqm1": float(alpha_crit_sqm_layer1),
+                #             f"{layer}/alpha_crit_sqm10": float(alpha_crit_sqm_layer10),
+                #             f"{layer}/alpha_crit_rcv1": float(alpha_crit_rcv_layer1),
+                #             f"{layer}/alpha_crit_rs1": float(alpha_crit_rs_layer1),
+                #             f"{layer}/alpha_crit_rvar1": float(alpha_crit_rvar_layer1),
+                #             f"{layer}/alpha_crit_rsqm1": float(alpha_crit_rsqm_layer1),
+                #             f"{layer}/alpha_crit_rcv10": float(alpha_crit_rcv_layer10),
+                #             f"{layer}/alpha_crit_rs10": float(alpha_crit_rs_layer10),
+                #             f"{layer}/alpha_crit_rvar10": float(alpha_crit_rvar_layer10),
+                #             f"{layer}/alpha_crit_rsqm10": float(alpha_crit_rsqm_layer10),
+                #             "reg"                  : reg
+                #         })
 
+                #         if config.lr_schedule == "pl_lyapunov":
+                #             # if task <= 2:
+                #             if config.param == "sqm10":
+                #                 lr_star = pl_scheduler.step(layer, eff_lr, alpha_crit_sqm_layer10, total_updates, total_steps)
+                #             elif config.param == "sqm1":
+                #                 lr_star = pl_scheduler.step(layer, eff_lr, alpha_crit_sqm_layer1, total_updates, total_steps)
+                #             elif config.param == "scv10":
+                #                 lr_star = pl_scheduler.step(layer, eff_lr, alpha_crit_scv_layer10, total_updates, total_steps)
+                #             elif config.param == "scv1":
+                #                 lr_star = pl_scheduler.step(layer, eff_lr, alpha_crit_scv_layer1, total_updates, total_steps)
+                #             elif config.param == "svar10":
+                #                 lr_star = pl_scheduler.step(layer, eff_lr, alpha_crit_svar_layer10, total_updates, total_steps)
+                #             elif config.param == "svar1":
+                #                 lr_star = pl_scheduler.step(layer, eff_lr, alpha_crit_svar_layer1, total_updates, total_steps)
+                #             elif config.param == "ss10":
+                #                 lr_star = pl_scheduler.step(layer, eff_lr, alpha_crit_ss_layer10, total_updates, total_steps)
+                #             elif config.param == "ss1":
+                #                 lr_star = pl_scheduler.step(layer, eff_lr, alpha_crit_ss_layer1, total_updates, total_steps)
+                #             elif config.param == "rcv1":
+                #                 lr_star = pl_scheduler.step(layer, eff_lr, alpha_crit_rcv_layer1, total_updates, total_steps)
+                #             elif config.param == "rs1":
+                #                 lr_star = pl_scheduler.step(layer, eff_lr, alpha_crit_rs_layer1, total_updates, total_steps)
+                #             elif config.param == "rvar1":
+                #                 lr_star = pl_scheduler.step(layer, eff_lr, alpha_crit_rvar_layer1, total_updates, total_steps)
+                #             elif config.param == "rsqm1":
+                #                 lr_star = pl_scheduler.step(layer, eff_lr, alpha_crit_rsqm_layer1, total_updates, total_steps)
+                #             elif config.param == "rcv10":
+                #                 lr_star = pl_scheduler.step(layer, eff_lr, alpha_crit_rcv_layer10, total_updates, total_steps)
+                #             elif config.param == "rs10":
+                #                 lr_star = pl_scheduler.step(layer, eff_lr, alpha_crit_rs_layer10, total_updates, total_steps)
+                #             elif config.param == "rvar10":
+                #                 lr_star = pl_scheduler.step(layer, eff_lr, alpha_crit_rvar_layer10, total_updates, total_steps)
+                #             elif config.param == "rsqm10":
+                #                 lr_star = pl_scheduler.step(layer, eff_lr, alpha_crit_rsqm_layer10, total_updates, total_steps)
+                #             elif config.param == "s_tau":
+                #                 lr_star = pl_scheduler.step(layer, eff_lr, scalars["tau"], total_updates, total_steps)
+                #             elif config.param == "r_tau":
+                #                 lr_star = pl_scheduler.step(layer, eff_lr, act_scalars["tau"], total_updates, total_steps)
+                #             # lr_star = pl_scheduler.step(layer, eff_lr, scalars["tau"], config)
 
-            #         wandb.log({
-            #             f"{layer}/sharp"       : norm_lam,
-            #             f"{layer}/mu"          : scalars["lam_mean"],
-            #             f"{layer}/tau"         : scalars["tau"],
-            #             f"{layer}/cv"          : scalars["lam_cv"],
-            #             f"{layer}/eff_lr"      : eff_lr,
-            #             f"{layer}/predict"     : layer_pred,
-            #             # f"{layer}/alpha_crit_s": float(alpha_crit_s_layer),
-            #             f"{layer}/alpha_crit_scv1": float(alpha_crit_scv_layer1),
-            #             f"{layer}/alpha_crit_ss1": float(alpha_crit_ss_layer1),
-            #             f"{layer}/alpha_crit_svar1": float(alpha_crit_svar_layer1),
-            #             f"{layer}/alpha_crit_scv10": float(alpha_crit_scv_layer10),
-            #             f"{layer}/alpha_crit_ss10": float(alpha_crit_ss_layer10),
-            #             f"{layer}/alpha_crit_svar10": float(alpha_crit_svar_layer10),
-            #             f"{layer}/alpha_crit_sqm1": float(alpha_crit_sqm_layer1),
-            #             f"{layer}/alpha_crit_sqm10": float(alpha_crit_sqm_layer10),
-            #             f"{layer}/alpha_crit_rcv1": float(alpha_crit_rcv_layer1),
-            #             f"{layer}/alpha_crit_rs1": float(alpha_crit_rs_layer1),
-            #             f"{layer}/alpha_crit_rvar1": float(alpha_crit_rvar_layer1),
-            #             f"{layer}/alpha_crit_rsqm1": float(alpha_crit_rsqm_layer1),
-            #             f"{layer}/alpha_crit_rcv10": float(alpha_crit_rcv_layer10),
-            #             f"{layer}/alpha_crit_rs10": float(alpha_crit_rs_layer10),
-            #             f"{layer}/alpha_crit_rvar10": float(alpha_crit_rvar_layer10),
-            #             f"{layer}/alpha_crit_rsqm10": float(alpha_crit_rsqm_layer10),
-            #             "reg"                  : reg
-            #         })
-
-            #         if config.lr_schedule == "pl_lyapunov":
-            #             # if task <= 2:
-            #             if config.param == "sqm10":
-            #                 lr_star = pl_scheduler.step(layer, eff_lr, alpha_crit_sqm_layer10, total_updates, total_steps)
-            #             elif config.param == "sqm1":
-            #                 lr_star = pl_scheduler.step(layer, eff_lr, alpha_crit_sqm_layer1, total_updates, total_steps)
-            #             elif config.param == "scv10":
-            #                 lr_star = pl_scheduler.step(layer, eff_lr, alpha_crit_scv_layer10, total_updates, total_steps)
-            #             elif config.param == "scv1":
-            #                 lr_star = pl_scheduler.step(layer, eff_lr, alpha_crit_scv_layer1, total_updates, total_steps)
-            #             elif config.param == "svar10":
-            #                 lr_star = pl_scheduler.step(layer, eff_lr, alpha_crit_svar_layer10, total_updates, total_steps)
-            #             elif config.param == "svar1":
-            #                 lr_star = pl_scheduler.step(layer, eff_lr, alpha_crit_svar_layer1, total_updates, total_steps)
-            #             elif config.param == "ss10":
-            #                 lr_star = pl_scheduler.step(layer, eff_lr, alpha_crit_ss_layer10, total_updates, total_steps)
-            #             elif config.param == "ss1":
-            #                 lr_star = pl_scheduler.step(layer, eff_lr, alpha_crit_ss_layer1, total_updates, total_steps)
-            #             elif config.param == "rcv1":
-            #                 lr_star = pl_scheduler.step(layer, eff_lr, alpha_crit_rcv_layer1, total_updates, total_steps)
-            #             elif config.param == "rs1":
-            #                 lr_star = pl_scheduler.step(layer, eff_lr, alpha_crit_rs_layer1, total_updates, total_steps)
-            #             elif config.param == "rvar1":
-            #                 lr_star = pl_scheduler.step(layer, eff_lr, alpha_crit_rvar_layer1, total_updates, total_steps)
-            #             elif config.param == "rsqm1":
-            #                 lr_star = pl_scheduler.step(layer, eff_lr, alpha_crit_rsqm_layer1, total_updates, total_steps)
-            #             elif config.param == "rcv10":
-            #                 lr_star = pl_scheduler.step(layer, eff_lr, alpha_crit_rcv_layer10, total_updates, total_steps)
-            #             elif config.param == "rs10":
-            #                 lr_star = pl_scheduler.step(layer, eff_lr, alpha_crit_rs_layer10, total_updates, total_steps)
-            #             elif config.param == "rvar10":
-            #                 lr_star = pl_scheduler.step(layer, eff_lr, alpha_crit_rvar_layer10, total_updates, total_steps)
-            #             elif config.param == "rsqm10":
-            #                 lr_star = pl_scheduler.step(layer, eff_lr, alpha_crit_rsqm_layer10, total_updates, total_steps)
-            #             elif config.param == "s_tau":
-            #                 lr_star = pl_scheduler.step(layer, eff_lr, scalars["tau"], total_updates, total_steps)
-            #             elif config.param == "r_tau":
-            #                 lr_star = pl_scheduler.step(layer, eff_lr, act_scalars["tau"], total_updates, total_steps)
-            #             # lr_star = pl_scheduler.step(layer, eff_lr, scalars["tau"], config)
-
-            #     # accumulate union across layers for this log step
-            #     ly_union_sum += union_pred_step
-            #     eff_acrit_scv1_union_sum += union_eff_gt_acrit_step_scv1
-            #     eff_acrit_ss1_union_sum += union_eff_gt_acrit_step_ss1
-            #     eff_acrit_svar1_union_sum += union_eff_gt_acrit_step_svar1
-            #     eff_acrit_ssqm1_union_sum += union_eff_gt_acrit_step_sqm1
-            #     eff_acrit_scv10_union_sum += union_eff_gt_acrit_step_scv10
-            #     eff_acrit_ss10_union_sum += union_eff_gt_acrit_step_ss10
-            #     eff_acrit_svar10_union_sum += union_eff_gt_acrit_step_svar10
-            #     eff_acrit_ssqm10_union_sum += union_eff_gt_acrit_step_sqm10
-            #     eff_acrit_rcv1_union_sum += union_eff_gt_acrit_step_rcv1
-            #     eff_acrit_rs1_union_sum += union_eff_gt_acrit_step_rs1
-            #     eff_acrit_rvar1_union_sum += union_eff_gt_acrit_step_rvar1
-            #     eff_acrit_rsqm1_union_sum += union_eff_gt_acrit_step_rsqm1
-            #     eff_acrit_rcv10_union_sum += union_eff_gt_acrit_step_rcv10
-            #     eff_acrit_rs10_union_sum += union_eff_gt_acrit_step_rs10
-            #     eff_acrit_rvar10_union_sum += union_eff_gt_acrit_step_rvar10
-            #     eff_acrit_rsqm10_union_sum += union_eff_gt_acrit_step_rsqm10
+                #     # accumulate union across layers for this log step
+                #     ly_union_sum += union_pred_step
+                #     eff_acrit_scv1_union_sum += union_eff_gt_acrit_step_scv1
+                #     eff_acrit_ss1_union_sum += union_eff_gt_acrit_step_ss1
+                #     eff_acrit_svar1_union_sum += union_eff_gt_acrit_step_svar1
+                #     eff_acrit_ssqm1_union_sum += union_eff_gt_acrit_step_sqm1
+                #     eff_acrit_scv10_union_sum += union_eff_gt_acrit_step_scv10
+                #     eff_acrit_ss10_union_sum += union_eff_gt_acrit_step_ss10
+                #     eff_acrit_svar10_union_sum += union_eff_gt_acrit_step_svar10
+                #     eff_acrit_ssqm10_union_sum += union_eff_gt_acrit_step_sqm10
+                #     eff_acrit_rcv1_union_sum += union_eff_gt_acrit_step_rcv1
+                #     eff_acrit_rs1_union_sum += union_eff_gt_acrit_step_rs1
+                #     eff_acrit_rvar1_union_sum += union_eff_gt_acrit_step_rvar1
+                #     eff_acrit_rsqm1_union_sum += union_eff_gt_acrit_step_rsqm1
+                #     eff_acrit_rcv10_union_sum += union_eff_gt_acrit_step_rcv10
+                #     eff_acrit_rs10_union_sum += union_eff_gt_acrit_step_rs10
+                #     eff_acrit_rvar10_union_sum += union_eff_gt_acrit_step_rvar10
+                #     eff_acrit_rsqm10_union_sum += union_eff_gt_acrit_step_rsqm10
 
                 eigs = optimizers.estimate_hessian_topk(model, loss, params, k=1)
                 sharpness = eigs[0]
@@ -654,7 +706,7 @@ for task in range(config.runs):
 
             #     norm_sharpness = optimizers.get_norm_sharpness(optimizer, sharpness, config)
             #     # lambda_min_norm = optimizers.get_norm_sharpness(optimizer, lambda_min, config)
-            #     this_normalized_sharp += norm_sharpness 
+            #     this_normalized_sharp += norm_sharpness
 
             #     effective_lr = optimizers.compute_effective_lr(
             #         optimizer, cfg=config, step=total_updates, sgd_mode="time"
@@ -665,7 +717,6 @@ for task in range(config.runs):
             #     # lambda_state, lambda_log = misc.update_stat(lambda_min_norm, lambda_state, effective_lr)
             #     ly_snr_sum += sharp_log["collapse_pred"]
             #     ly_snr_2_sum += sharp_log["collapse_pred2"]
-                
 
             # Sharpness Aware Minimization
             if config.sam:
@@ -809,7 +860,7 @@ for task in range(config.runs):
                 #     }
 
                 #     # Prediction: 1 if we are above the critical LR
-                #     # snr_sum += pred_real 
+                #     # snr_sum += pred_real
                 #     # k_snr_sum += K_pred_real
                 #     # s_snr_sum += S_pred_real
                 #     snr_sum += pred_real
@@ -832,13 +883,13 @@ for task in range(config.runs):
 
                 #     n_crit = min(0.8/r, 2/(norm_sharpness * (1 + r)))
 
-                    # mark = {
+                # mark = {
                 #         # "snr_T":            float(T_t) if T_t is not None else float("nan"),
                 #         # "snr_sigma2_hat":   float(sigma2_hat) if sigma2_hat is not None else float("nan"),
                 #         "mb_sigma2_hat":    float(sigma2_hat_mb),
                 #         "mb_snr_T":         float(T_t_mb),
                 #         # "S_t_mb":           float(S_t_mb),
-                        # "sharpness":        sharpness,
+                # "sharpness":        sharpness,
                 #         # "rho":              effective_lr * sharpness / 2,
                 #         # "rho_norm":      effective_lr * norm_sharpness / 2,
                 #         "n_crit_nois":  0.8/r,
@@ -859,7 +910,7 @@ for task in range(config.runs):
                 #         # "snr_T_thresh":     float(thresh) if thresh is not None else float("nan"),
                 #         # "snr_K_real":       int(K_pred_real) if K_pred_real is not None else -1,
                 #         # "snr_S_real":       int(S_pred_real) if S_pred_real is not None else -1,
-                    # }
+                # }
                 #     # ------------------------------------------------------------------------
                 #     if ly_sched is not None:
                 #         if config.param == "sqm10":
@@ -902,14 +953,15 @@ for task in range(config.runs):
                 #     else:
                 #         log_extra  = {}
                 optimizer.step()
-                
-                
+
                 # betas scheduling
                 if config.optimizer == "adam":
-                    optimizer.param_groups[0]['betas'] = optimizers.get_betas(config, epoch)
+                    optimizer.param_groups[0]["betas"] = optimizers.get_betas(
+                        config, epoch
+                    )
                 # lr schedule step
                 if config.lr_schedule != "constant" and scheduler is not None:
-                    scheduler.step()    
+                    scheduler.step()
                 # if ly_sched is not None:
                 #     lr_star, _ = ly_sched.step(effective_lr, lambda_log["tau"])
                 #     log_extra  = {"ly_lr_star": lr_star}
@@ -929,7 +981,7 @@ for task in range(config.runs):
             update_norm = delta.mean().item()
             sum_up += update_norm
             total_updates += 1
-            
+
             if total_updates % config.log_interval == 0:
                 # use_vals = { f"use_{name}": optimizers.compute_use_for_activation(h) for name, h in activations.items() }
                 # avg_use_val = sum(use_vals.values()) / len(use_vals)
@@ -979,7 +1031,6 @@ for task in range(config.runs):
         if scheduler is not None:
             scheduler.step()
 
-
     model.eval()
     eval_loader = data.DataLoader(
         train_dataset, batch_size=config.batch_size, shuffle=False
@@ -1012,7 +1063,7 @@ for task in range(config.runs):
     cut = s.sum() * 0.99
     j = (torch.cumsum(s, 0) >= cut).nonzero()[0].item() + 1
     effective_rank = -j / float(h.shape[1])
-    steps = (config.epochs * len(loader) / config.log_interval)
+    steps = config.epochs * len(loader) / config.log_interval
     run.log(
         {
             "J": J,

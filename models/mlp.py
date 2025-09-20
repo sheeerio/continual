@@ -6,6 +6,7 @@ from config import get_parser
 
 config = get_parser().parse_args()
 
+
 class MLP(nn.Module):
     def __init__(self, i, h, o):
         super().__init__()
@@ -24,14 +25,14 @@ class MLP(nn.Module):
                     nn.init.kaiming_uniform_(
                         m.weight,
                         a=config.alpha if config.activation == "adalin" else 0,
-                        nonlinearity=(
-                            misc.activation_map[config.activation]
-                        ),
+                        nonlinearity=(misc.activation_map[config.activation]),
                     )
                 elif config.initialization == "xavier":
                     nn.init.xavier_uniform_(m.weight)
                 elif config.initialization == "normal":
-                    nn.init.normal_(m.weight, mean=config.normal_mean, std=config.normal_std)
+                    nn.init.normal_(
+                        m.weight, mean=config.normal_mean, std=config.normal_std
+                    )
                 elif config.initialization == "uniform":
                     nn.init.uniform_(m.weight, a=config.uniform_a, b=config.uniform_b)
                 if m.bias is not None:
@@ -91,6 +92,7 @@ class MLP(nn.Module):
             x = self.fc2(x)
             # x = self.fc3(x)
         return self.fc4(x)
+
 
 class BatchNormMLP(nn.Module):
     def __init__(self, i, h, o):

@@ -4,6 +4,7 @@ from torchvision.datasets import MNIST, CIFAR10
 from torchvision import transforms
 from torch.utils.data import Subset
 
+
 def get_dataset(config):
     if config.dataset == "MNIST":
         tmp = MNIST(root="../data", train=True, download=True)
@@ -13,7 +14,7 @@ def get_dataset(config):
             [transforms.ToTensor(), transforms.Normalize(DATA_MEAN, DATA_STD)]
         )
         full = MNIST(root="../data", train=True, download=True, transform=tf)
-        perm = torch.randperm(len(full))#[:10600]
+        perm = torch.randperm(len(full))  # [:10600]
         train_dataset = Subset(full, perm)
         test_dataset = MNIST(root="../data", train=False, download=True, transform=tf)
         in_ch = 1
@@ -25,7 +26,9 @@ def get_dataset(config):
         tf = transforms.Compose(
             [
                 transforms.ToTensor(),
-                transforms.Normalize(tuple(DATA_MEAN.tolist()), tuple(DATA_STD.tolist())),
+                transforms.Normalize(
+                    tuple(DATA_MEAN.tolist()), tuple(DATA_STD.tolist())
+                ),
             ]
         )
         full = CIFAR10(root="../data", train=True, download=True, transform=tf)
@@ -72,7 +75,9 @@ def get_dataset(config):
         tf = transforms.Compose(
             [
                 transforms.ToTensor(),
-                transforms.Normalize(tuple(DATA_MEAN.tolist()), tuple(DATA_STD.tolist())),
+                transforms.Normalize(
+                    tuple(DATA_MEAN.tolist()), tuple(DATA_STD.tolist())
+                ),
             ]
         )
 
@@ -101,7 +106,9 @@ def get_dataset(config):
         full = ImageNet(root="../data", split="train", download=True, transform=tf)
         perm = torch.randperm(len(full))[:128000]
         train_dataset = Subset(full, perm)
-        test_dataset = ImageNet(root="../data", split="val", download=True, transform=tf)
+        test_dataset = ImageNet(
+            root="../data", split="val", download=True, transform=tf
+        )
         in_ch, input_size = 3, 3 * 224 * 224
 
     return train_dataset, test_dataset, in_ch, input_size, DATA_MEAN, DATA_STD

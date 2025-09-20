@@ -1,5 +1,6 @@
 import argparse
 
+
 def get_parser():
     parser = argparse.ArgumentParser()
 
@@ -59,10 +60,24 @@ def get_parser():
     parser.add_argument("--lr", type=float, default=0.001)
     parser.add_argument("--beta1", type=float, default=0.9)
     parser.add_argument("--beta2", type=float, default=0.999)
-    parser.add_argument("--beta_schedule", action="store_true", help="Use beta schedule for Adam optimizer")
-    parser.add_argument("--reset_model", action="store_true", help="Reset model at the start of each run")
-    parser.add_argument("--random_length", action="store_true", help="Randomize task lengths")
-    parser.add_argument("--reset_optimizer", action="store_true", help="Reset optimizer state at the start of each run")
+    parser.add_argument(
+        "--beta_schedule",
+        action="store_true",
+        help="Use beta schedule for Adam optimizer",
+    )
+    parser.add_argument(
+        "--reset_model",
+        action="store_true",
+        help="Reset model at the start of each run",
+    )
+    parser.add_argument(
+        "--random_length", action="store_true", help="Randomize task lengths"
+    )
+    parser.add_argument(
+        "--reset_optimizer",
+        action="store_true",
+        help="Reset optimizer state at the start of each run",
+    )
     parser.add_argument(
         "--ns",
         type=float,
@@ -73,11 +88,21 @@ def get_parser():
         "--reg",
         type=str,
         default="l2",
-        choices=["l2", "l2_init", "wass", "spectral", "shrink_perturb", "ortho", "orthofrob"],
+        choices=[
+            "l2",
+            "l2_init",
+            "wass",
+            "spectral",
+            "shrink_perturb",
+            "ortho",
+            "orthofrob",
+        ],
     )
     parser.add_argument("--wass_lambda", type=float, default=0.0)
     parser.add_argument("--exp_name", type=str, default="")
-    parser.add_argument("--optimizer", type=str, default="adam", choices=["adam", "sgd", "clamped_adam"])
+    parser.add_argument(
+        "--optimizer", type=str, default="adam", choices=["adam", "sgd", "clamped_adam"]
+    )
     parser.add_argument("--param", type=str, default="sqm10")
     # Wsd scheduler hyperparameters
     parser.add_argument(
@@ -121,7 +146,7 @@ def get_parser():
         "--skew_peak_frac",
         type=float,
         default=0.4,
-        help="Fraction of total steps at which LR peaks (for skew schedule)"
+        help="Fraction of total steps at which LR peaks (for skew schedule)",
     )
     parser.add_argument(
         "--initialization",
@@ -180,7 +205,19 @@ def get_parser():
         "--lr_schedule",
         type=str,
         default="constant",
-        choices=["constant", "step", "linear", "exponential", "polynomial", "cosine", "wsd", "power", "skew", "lyapunov", "pl_lyapunov"],
+        choices=[
+            "constant",
+            "step",
+            "linear",
+            "exponential",
+            "polynomial",
+            "cosine",
+            "wsd",
+            "power",
+            "skew",
+            "lyapunov",
+            "pl_lyapunov",
+        ],
         help="Type of learning‐rate schedule",
     )
     parser.add_argument(
@@ -193,25 +230,19 @@ def get_parser():
         "--step_size",
         type=int,
         default=10,
-        help="(for step schedule) number of epochs between drops"
+        help="(for step schedule) number of epochs between drops",
     )
     parser.add_argument(
-        "--gamma",
-        type=float,
-        default=0.1,
-        help="(for step & exponential) decay factor"
+        "--gamma", type=float, default=0.1, help="(for step & exponential) decay factor"
     )
     parser.add_argument(
-        "--power",
-        type=float,
-        default=1.0,
-        help="(for polynomial) power degree"
+        "--power", type=float, default=1.0, help="(for polynomial) power degree"
     )
-    
+
     parser.add_argument("--window", type=int, default=30)
     parser.add_argument("--safety", type=float, default=0.8)
-    parser.add_argument("--cool",   type=float, default=0.99)
-    parser.add_argument("--warm",   type=float, default=1.01)
+    parser.add_argument("--cool", type=float, default=0.99)
+    parser.add_argument("--warm", type=float, default=1.01)
 
     parser.add_argument("--ortho_lambda", type=float, default=1e-3)
     parser.add_argument("--ortho_frac", type=float, default=2)

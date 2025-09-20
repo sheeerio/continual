@@ -4,16 +4,18 @@ import math
 config = get_parser().parse_args()
 
 # total_steps  = config.epochs * math.ceil(len(train_dataset) / config.batch_size)
-total_steps = config.epochs * (20100 // config.batch_size) 
+total_steps = config.epochs * (20100 // config.batch_size)
 total_tokens = total_steps * config.batch_size
 
+
 def skew_lambda(step):
-    t = step / total_steps  
+    t = step / total_steps
     p = config.skew_peak_frac
     if t < p:
-        return t / p                          
+        return t / p
     else:
-        return max((1 - t) / (1 - p), 0.0)  
+        return max((1 - t) / (1 - p), 0.0)
+
 
 def wsd_lambda(step):
     n = step * config.batch_size
@@ -25,6 +27,7 @@ def wsd_lambda(step):
         return 1.0
     else:
         return max(0.0, (total_tokens - n) / Nd)
+
 
 def power_lambda(step):
     power_alpha = config.lr * (config.power_warmup_tokens ** (config.power_exponent))
