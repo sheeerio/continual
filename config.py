@@ -210,7 +210,7 @@ def get_parser():
     
     parser.add_argument("--window", type=int, default=30)
     parser.add_argument("--safety", type=float, default=0.85)
-    parser.add_argument("--cool",   type=float, default=0.98)
+    parser.add_argument("--cool",   type=float, default=0.95)
     parser.add_argument("--warm",   type=float, default=1.005)
 
     parser.add_argument("--ortho_lambda", type=float, default=1e-3)
