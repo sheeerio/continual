@@ -2,3 +2,4 @@ logs/
 wandb/
 continual-venv/
 __pycache__/
+plots/
