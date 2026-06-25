@@ -4,16 +4,18 @@ import math
 config = get_parser().parse_args()
 
 # total_steps  = config.epochs * math.ceil(len(train_dataset) / config.batch_size)
-total_steps = config.epochs * (20100 // config.batch_size)  # Assuming 50,000 training samples for MNIST
+total_steps = config.epochs * (20100 // config.batch_size)
 total_tokens = total_steps * config.batch_size
 
+
 def skew_lambda(step):
-    t = step / total_steps  
+    t = step / total_steps
     p = config.skew_peak_frac
     if t < p:
-        return t / p                          
+        return t / p
     else:
-        return max((1 - t) / (1 - p), 0.0)  
+        return max((1 - t) / (1 - p), 0.0)
+
 
 def wsd_lambda(step):
     n = step * config.batch_size
@@ -26,6 +28,7 @@ def wsd_lambda(step):
     else:
         return max(0.0, (total_tokens - n) / Nd)
 
+
 def power_lambda(step):
     power_alpha = config.lr * (config.power_warmup_tokens ** (config.power_exponent))
     n = step * config.batch_size
@@ -36,10 +39,8 @@ def power_lambda(step):
         config.lr,
     )
     if n < Nw:
-        # warmup to η_power(Nw)
         return (n / Nw) * (eta_pw(Nw) / config.lr)
     else:
-        # middle: pure power‐law
         return eta_pw(n) / config.lr
     # else:
     #     # final decay of the *value* at n = N – Nd

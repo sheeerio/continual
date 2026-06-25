@@ -3,3 +3,8 @@ wandb/
 continual-venv/
 __pycache__/
 plots/
+utility_decay.png
+utility_per_task.png
+plasticity_experiment.py 
+performance_profile.png
+plasticity_gap_over_time.png

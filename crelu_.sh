@@ -1,11 +1,7 @@
 #!/bin/bash
 
-# Define the number of parallel jobs you want to run.
-# This should be balanced between your CPU cores and GPU memory.
-# Start with a conservative number (e.g., 2-4) and increase if your GPU utilization allows.
-MAX_PARALLEL_JOBS=4 # Adjust this based on your RTX 3070 Ti's memory and performance
+MAX_PARALLEL_JOBS=4 
 
-# List of commands to run
 COMMANDS=(
     # "python3 implicit_regularization.py --seed=2025 --activation=adalin --runs=3 --name=3uniform_adalin7 --alpha=0.7 --exp_name=partial_adam"
     # "python3 implicit_regularization.py --seed=2025 --model=MLP --activation=adalin --runs=3 --name=3uniform_adalin7+l2 --alpha=0.7 --exp_name=partial_adam --reg=l2 --l2_lambda=5e-4"
@@ -161,34 +157,27 @@ COMMANDS=(
 
 )
 
-# Array to keep track of background PIDs
 PIDS=()
 
 for cmd in "${COMMANDS[@]}"; do
-    # Check if we have reached the maximum number of parallel jobs
     while [[ ${#PIDS[@]} -ge $MAX_PARALLEL_JOBS ]]; do
-        # Wait for any background job to finish
         for i in "${!PIDS[@]}"; do
             if ! kill -0 "${PIDS[$i]}" 2>/dev/null; then
-                # Job has finished, remove its PID
                 unset PIDS[$i]
                 break
             fi
         done
-        sleep 1 # Avoid busy-waiting
-        PIDS=("${PIDS[@]}") # Re-index array
+        sleep 1
+        PIDS=("${PIDS[@]}") 
     done
 
     echo "Starting: $cmd"
-    # Run the command in the background and store its PID
-    # Redirect output to separate log files for each run
     log_file="logs/$(echo "$cmd" | tr -c '[:alnum:]' '_').log"
     mkdir -p logs
     nohup $cmd > "$log_file" 2>&1 &
     PIDS+=($!) # Add the PID of the last background command
 done
 
-# Wait for all remaining background jobs to complete
 echo "Waiting for all experiments to finish..."
 wait
 echo "All experiments completed."

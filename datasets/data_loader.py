@@ -1,8 +1,11 @@
 import torch
 import torch.utils.data as data
 from torchvision.datasets import MNIST, CIFAR10
-from torchvision import transforms
+import torchvision.transforms as T
+import torchvision.transforms as transforms
 from torch.utils.data import Subset
+import numpy as np
+
 
 def get_dataset(config):
     if config.dataset == "MNIST":
@@ -13,7 +16,7 @@ def get_dataset(config):
             [transforms.ToTensor(), transforms.Normalize(DATA_MEAN, DATA_STD)]
         )
         full = MNIST(root="../data", train=True, download=True, transform=tf)
-        perm = torch.randperm(len(full))#[:10600]
+        perm = torch.randperm(len(full))[:10600]
         train_dataset = Subset(full, perm)
         test_dataset = MNIST(root="../data", train=False, download=True, transform=tf)
         in_ch = 1
@@ -25,7 +28,9 @@ def get_dataset(config):
         tf = transforms.Compose(
             [
                 transforms.ToTensor(),
-                transforms.Normalize(tuple(DATA_MEAN.tolist()), tuple(DATA_STD.tolist())),
+                transforms.Normalize(
+                    tuple(DATA_MEAN.tolist()), tuple(DATA_STD.tolist())
+                ),
             ]
         )
         full = CIFAR10(root="../data", train=True, download=True, transform=tf)
@@ -35,36 +40,53 @@ def get_dataset(config):
         in_ch = 3
         input_size = 3 * 32 * 32
     elif config.dataset == "PermutedMNIST":
-        base_full = MNIST(root="../data", train=True, download=True)
-        DATA_MEAN = (base_full.data / 255.0).mean(axis=(0, 1, 2))
-        DATA_STD = (base_full.data / 255.0).std(axis=(0, 1, 2))
+        rnd = np.random.RandomState(config.seed)
         torch.manual_seed(config.seed)
-        subsample_idx = torch.randperm(len(base_full))[:51200]
-        base = Subset(base_full, subsample_idx)
-        num_tasks = config.runs
-        perms = [torch.randperm(28 * 28) for _ in range(num_tasks)]
-
-        def make_perm_tf(t):
-            perm = perms[t]
-            return transforms.Lambda(lambda x: x.view(-1)[perm].view(1, 28, 28))
-
-        base.dataset = base_full
-        base.indices = subsample_idx
-        train_dataset = base
-        test_dataset = MNIST(
-            root="../data",
-            train=False,
-            download=True,
-            transform=transforms.Compose(
-                [
-                    transforms.ToTensor(),
-                    transforms.Normalize(DATA_MEAN, DATA_STD),
-                    transforms.Lambda(lambda x: x),
-                ]
-            ),
-        )
+        idx_permute = torch.from_numpy(rnd.permutation(28*28))
+        
+        transform = T.Compose([
+            T.ToTensor(),
+            T.Normalize((0.1307,), (0.3081,)),
+            T.Lambda(lambda x: torch.flatten(x)[idx_permute]) # added permutation
+        ])
+        
+        train_dataset = MNIST('../data', train=True, download=True, transform=transform)
+        test_dataset = MNIST('../data', train=False, download=True, transform=transform)
+        DATA_MEAN = (train_dataset.data / 255.0).mean(axis=(0, 1, 2))
+        DATA_STD = (train_dataset.data / 255.0).std(axis=(0, 1, 2))
         in_ch = 1
         input_size = 28 * 28
+                
+        # base_full = MNIST(root="../data", train=True, download=True)
+        # DATA_MEAN = (base_full.data / 255.0).mean(axis=(0, 1, 2))
+        # DATA_STD = (base_full.data / 255.0).std(axis=(0, 1, 2))
+        # torch.manual_seed(config.seed)
+        # subsample_idx = torch.randperm(len(base_full))[:10600]
+        # base = Subset(base_full, subsample_idx)
+        # num_tasks = config.runs
+        # perms = [torch.randperm(28 * 28) for _ in range(num_tasks)]
+
+        # def make_perm_tf(t):
+        #     perm = perms[t]
+        #     return transforms.Lambda(lambda x: x.view(-1)[perm].view(1, 28, 28))
+
+        # base.dataset = base_full
+        # base.indices = subsample_idx
+        # train_dataset = base
+        # test_dataset = MNIST(
+        #     root="../data",
+        #     train=False,
+        #     download=True,
+        #     transform=transforms.Compose(
+        #         [
+        #             transforms.ToTensor(),
+        #             transforms.Normalize(DATA_MEAN, DATA_STD),
+        #             transforms.Lambda(lambda x: x),
+        #         ]
+        #     ),
+        # )
+        # in_ch = 1
+        # input_size = 28 * 28
     elif config.dataset == "Shuffle_CIFAR":
         tmp = CIFAR10(root="../data", train=True, download=True)
         DATA_MEAN = (tmp.data / 255.0).mean(axis=(0, 1, 2))
@@ -72,7 +94,9 @@ def get_dataset(config):
         tf = transforms.Compose(
             [
                 transforms.ToTensor(),
-                transforms.Normalize(tuple(DATA_MEAN.tolist()), tuple(DATA_STD.tolist())),
+                transforms.Normalize(
+                    tuple(DATA_MEAN.tolist()), tuple(DATA_STD.tolist())
+                ),
             ]
         )
 
@@ -101,7 +125,9 @@ def get_dataset(config):
         full = ImageNet(root="../data", split="train", download=True, transform=tf)
         perm = torch.randperm(len(full))[:128000]
         train_dataset = Subset(full, perm)
-        test_dataset = ImageNet(root="../data", split="val", download=True, transform=tf)
+        test_dataset = ImageNet(
+            root="../data", split="val", download=True, transform=tf
+        )
         in_ch, input_size = 3, 3 * 224 * 224
 
     return train_dataset, test_dataset, in_ch, input_size, DATA_MEAN, DATA_STD
