@@ -268,10 +268,28 @@ def get_parser():
         help="Type of adaptive regularization",
     )
     parser.add_argument(
+        "--adaptive_multiplier",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "If true (default), the local adaptive path uses the real volatility-mixed "
+            "rig_mix as the per-layer coefficient multiplier. If false, rig_mix is forced "
+            "to 1.0 so the per-layer coefficient is the constant reg_coeff -- this is the "
+            "'fixed' arm of a fixed-vs-adaptive comparison, run through the identical "
+            "adaptive_reg code path."
+        ),
+    )
+    parser.add_argument(
+        "--reg_coeff",
+        type=float,
+        default=None,
+        help="Per-layer regularization coefficient for adaptive_reg (replaces --reg_sensitivity)",
+    )
+    parser.add_argument(
         "--reg_sensitivity",
         type=float,
         default=0.001,
-        help="Scaling factor for inverse tau penalty",
+        help="[Deprecated, use --reg_coeff] Scaling factor for inverse tau penalty",
     )
     parser.add_argument(
         "--underparameterized",

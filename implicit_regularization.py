@@ -482,7 +482,12 @@ for task in range(config.runs):
                     config, "adaptive_scope", "local"
                 )  # "global" or "local"
                 reg_type = getattr(config, "adaptive_type", "l2")  # "l2" or "spectral"
-                sensitivity = getattr(config, "reg_sensitivity", 0.001)
+                reg_coeff = (
+                    config.reg_coeff
+                    if config.reg_coeff is not None
+                    else getattr(config, "reg_sensitivity", 0.001)
+                )
+                use_adaptive_multiplier = getattr(config, "adaptive_multiplier", True)
 
                 global_factor = None
                 if reg_scope == "global":
@@ -500,7 +505,7 @@ for task in range(config.runs):
 
                     g_tau = global_scalars["tau"]
                     g_inv_tau = 1.0 / (g_tau + 1e-12)
-                    global_factor = sensitivity * g_inv_tau
+                    global_factor = reg_coeff * g_inv_tau
 
                     if total_updates % config.log_interval == 0:
                         wandb.log(
@@ -540,17 +545,17 @@ for task in range(config.runs):
                         g_tau = global_scalars["tau"]
 
                         # OLD: Penalize Chaos (1/tau)
-                        # global_factor = sensitivity * (1.0 / (g_tau + 1e-12))
+                        # global_factor = reg_coeff * (1.0 / (g_tau + 1e-12))
 
                         # NEW: Penalize Rigidity (log(tau))
                         # If tau is high (rigid), reg increases to force movement/simplify geometry
-                        global_factor = sensitivity * math.log(1.0 + g_tau)
+                        global_factor = reg_coeff * math.log(1.0 + g_tau)
 
                         adaptive_factor = global_factor
                     else:
-                        # adaptive_factor = sensitivity * (1.0 / (tau + 1e-12))
+                        # adaptive_factor = reg_coeff * (1.0 / (tau + 1e-12))
 
-                        # adaptive_factor = sensitivity * math.log(1.0 + tau)
+                        # adaptive_factor = reg_coeff * math.log(1.0 + tau)
                         lam = getattr(config, "tau_mix_lambda", 0.7)
                         K = len(layer_states[layer].alphas)
                         ws = [(1.0 - lam) * (lam**k) for k in range(K)]
@@ -564,7 +569,9 @@ for task in range(config.runs):
                         ]
 
                         rig_mix = sum(w * r for w, r in zip(ws, rig_list))
-                        adaptive_factor = sensitivity * rig_mix
+                        if not use_adaptive_multiplier:
+                            rig_mix = 1.0
+                        adaptive_factor = reg_coeff * rig_mix
 
                         if total_updates % config.log_interval == 0:
                             wandb.log(
