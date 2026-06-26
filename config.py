@@ -49,7 +49,7 @@ def get_parser():
     parser.add_argument("--runs", type=int, default=100)
     parser.add_argument("--batch_size", type=int, default=256)
     parser.add_argument("--dropout", type=float, default=0.0)
-    parser.add_argument("--log_interval", type=int, default=40)
+    parser.add_argument("--log_interval", type=int, default=400)
     parser.add_argument("--epochs", type=int, default=0)
     parser.add_argument("--project", type=bool, default=False)
     parser.add_argument("--name", type=str, default="")
@@ -306,6 +306,12 @@ def get_parser():
         type=str,
         default="all",
         help="Comma-separated linear layer names to diagnose, or 'all'",
+    )
+    parser.add_argument(
+        "--feature_diag_max_plot_tasks",
+        type=int,
+        default=10,
+        help="Only save NFM/AGOP matrix plots for the first k tasks (scalars are still logged for every task); <=0 means no limit",
     )
     parser.add_argument(
         "--feature_diag_dir",

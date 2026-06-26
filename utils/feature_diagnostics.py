@@ -350,13 +350,15 @@ def run_feature_diagnostics(
     if total_samples == 0:
         return {"skipped": True, "reason": "Feature diagnostics received no samples."}
 
-    base_dir = os.path.join(
-        getattr(cfg, "feature_diag_dir", "plots/feature_diagnostics"),
-        run_name,
-        f"task_{task_idx + 1:03d}",
+    run_root = os.path.join(
+        getattr(cfg, "feature_diag_dir", "plots/feature_diagnostics"), run_name
     )
-    os.makedirs(base_dir, exist_ok=True)
-    run_root = os.path.dirname(base_dir)
+    base_dir = os.path.join(run_root, f"task_{task_idx + 1:03d}")
+
+    max_plot_tasks = int(getattr(cfg, "feature_diag_max_plot_tasks", 10))
+    should_plot = max_plot_tasks <= 0 or task_idx < max_plot_tasks
+    if should_plot:
+        os.makedirs(base_dir, exist_ok=True)
 
     layer_results = OrderedDict()
     npz_payload = {}
@@ -386,14 +388,18 @@ def run_feature_diagnostics(
         npz_payload[f"{layer_name}__delta_nfm"] = delta_nfm
         npz_payload[f"{layer_name}__agop"] = agop
 
-    np.savez_compressed(os.path.join(base_dir, "matrices.npz"), **npz_payload)
-    csv_path = _write_summary_csv(base_dir, layer_results)
-    figure_path = _plot_task_matrices(base_dir, task_idx, layer_results)
-    trajectory_paths = update_task_trajectory_plots(run_root, layer_results.keys())
+    csv_path = None
+    figure_path = None
+    trajectory_paths = {}
+    if should_plot:
+        np.savez_compressed(os.path.join(base_dir, "matrices.npz"), **npz_payload)
+        csv_path = _write_summary_csv(base_dir, layer_results)
+        figure_path = _plot_task_matrices(base_dir, task_idx, layer_results)
+        trajectory_paths = update_task_trajectory_plots(run_root, layer_results.keys())
 
     return {
         "skipped": False,
-        "task_dir": base_dir,
+        "task_dir": base_dir if should_plot else None,
         "run_root": run_root,
         "figure_path": figure_path,
         "trajectory_paths": trajectory_paths,

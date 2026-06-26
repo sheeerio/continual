@@ -554,7 +554,8 @@ class GradSNR:
         T_t = None
         if sigma2_hat > 0.0 and eta_eff > 0.0:
             gnorm2 = float(grad_flat.pow(2).sum().item())
-            T_t = (eta_eff * (sigma2_hat / max(1, batch_B))) / gnorm2
+            if gnorm2 > 0.0:
+                T_t = (eta_eff * (sigma2_hat / max(1, batch_B))) / gnorm2
 
         self.prev = grad_flat.detach().clone()
         return T_t, sigma2_hat

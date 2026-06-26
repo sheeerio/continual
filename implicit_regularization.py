@@ -1835,9 +1835,14 @@ for task in range(config.runs):
                     "delta_diag_corr"
                 ]
             run.log(diag_log)
-            print(
-                f"Feature diagnostics saved for task {task + 1} at {diag_info['task_dir']}"
-            )
+            if diag_info.get("task_dir"):
+                print(
+                    f"Feature diagnostics saved for task {task + 1} at {diag_info['task_dir']}"
+                )
+            else:
+                print(
+                    f"Feature diagnostics computed for task {task + 1} (scalars logged to wandb only)"
+                )
     res = results[config.activation]
     res["batch_error"].append(J)
     res["param_norm"].append(pn)
