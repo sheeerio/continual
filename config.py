@@ -19,6 +19,7 @@ def get_parser():
             "LinearNet",
             "CNN",
             "BatchNormCNN",
+            "ViT",
         ],
     )
     parser.add_argument(
@@ -45,6 +46,26 @@ def get_parser():
         ],
     )
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--results_csv",
+        type=str,
+        default=None,
+        help=(
+            "If set, append one tidy long-format row (regularizer, model, "
+            "adaptive_multiplier, reg_coeff, seed, dataset, final_acc, "
+            "acc_rel_first_task) to this CSV at the end of the run."
+        ),
+    )
+    parser.add_argument(
+        "--task_seed",
+        type=int,
+        default=None,
+        help=(
+            "Seed for the task-construction RNG (per-task label randomization), "
+            "decoupled from --seed which still drives model init/data-loader shuffling. "
+            "Defaults to --seed if unset (preserves prior behavior)."
+        ),
+    )
     parser.add_argument("--randomize_percent", type=float, default=0.0)
     parser.add_argument("--runs", type=int, default=100)
     parser.add_argument("--batch_size", type=int, default=256)

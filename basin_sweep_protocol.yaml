@@ -1,0 +1,25 @@
+# Coefficient-sensitivity (basin) sweep: fixed vs adaptive volatility-driven
+# regularization, frozen before launch. Do not edit after results start coming in --
+# create a new protocol file for any follow-up sweep instead.
+script: implicit_regularization.py
+
+fixed:
+  adaptive_reg: true
+  adaptive_scope: local
+  task_seed: 7
+  runs: 20
+  epochs: 200
+  batch_size: 256
+  log_interval: 400
+  optimizer: adam
+  exp_name: basin_sweep
+
+axes:
+  reg_coeff: [1e-5, 2.51189e-5, 6.30957e-5, 1.58489e-4, 3.98107e-4, 1e-3, 2.51189e-3, 6.30957e-3, 1.58489e-2, 3.98107e-2, 1e-1]
+  adaptive_multiplier: [false, true]
+  regularizer: [l2, spectral, wass, parseval]
+  model: [CNN, ViT]
+  dataset: [MNIST, CIFAR10]
+  seed: [1, 2, 3, 4, 5]
+
+results_csv: basin_sweep_results.csv

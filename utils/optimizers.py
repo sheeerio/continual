@@ -13,6 +13,8 @@ from utils.misc import EMAState
 def power_iteration_sigma_min(W: torch.Tensor,
                                iters: int = 3,
                                shift_mult: float = 1e-3) -> torch.Tensor:
+    if W.ndim > 2:
+        W = W.view(W.shape[0], -1)
     m, n = W.shape
     use_WtW = (n <= m)
     A = W.T @ W if use_WtW else W @ W.T
@@ -31,7 +33,7 @@ def power_iteration_sigma_min(W: torch.Tensor,
     return torch.sqrt(sigma_min_sq.clamp(min=0.0))
 
 
-def randomize_targets(dataset, p):
+def randomize_targets(dataset, p, generator=None):
     if isinstance(dataset, Subset):
         original_dataset = dataset.dataset
         subset_indices = dataset.indices
@@ -41,10 +43,11 @@ def randomize_targets(dataset, p):
             targets_list = original_dataset.targets
         n = len(subset_indices)
         k = int(p * n)
-        random_subset_idx = torch.randperm(n)[:k]
-        for i in random_subset_idx:
+        random_subset_idx = torch.randperm(n, generator=generator)[:k]
+        new_labels = torch.randint(0, 10, (k,), generator=generator).tolist()
+        for i, new_lbl in zip(random_subset_idx, new_labels):
             original_idx = subset_indices[i]
-            targets_list[original_idx] = random.randint(0, 9)
+            targets_list[original_idx] = new_lbl
 
         if isinstance(original_dataset.targets, torch.Tensor):
             original_dataset.targets = torch.tensor(targets_list)
@@ -60,9 +63,10 @@ def randomize_targets(dataset, p):
 
         n = len(targets_list)
         k = int(p * n)
-        idx = torch.randperm(n)[:k]
-        for i in idx:
-            targets_list[i] = random.randint(0, 9)
+        idx = torch.randperm(n, generator=generator)[:k]
+        new_labels = torch.randint(0, 10, (k,), generator=generator).tolist()
+        for i, new_lbl in zip(idx, new_labels):
+            targets_list[i] = new_lbl
 
         if isinstance(dataset.targets, torch.Tensor):
             dataset.targets = torch.tensor(targets_list)
@@ -106,7 +110,7 @@ def empirical_fischer_rank(model, dataset, device, thresh=0.99, max_m=100, cfg=N
     for x, y in loader:
         if m >= max_m:
             break
-        if cfg.model in ["CNN", "BatchNormCNN"]:
+        if cfg.model in ["CNN", "BatchNormCNN", "ViT"]:
             x = x.to(device)
         else:
             x = x.view(x.size(0), -1).to(device)

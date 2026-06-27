@@ -61,7 +61,7 @@ def update_stat(
         var_i = float(state.var2[i])
         tau_i = 2.0 * mu_i / (var_i + mu_i * mu_i + 1e-12)
         tau_scales.append(tau_i)
-        rig_scales.append(float(np.log(1.0 + 1.0 / (tau_i + 1e-12))))
+        rig_scales.append(float(np.log(max(1e-12, 1.0 + 1.0 / (tau_i + 1e-12)))))
 
     state.queue.append(x)
     lam_mean = sum(state.queue) / len(state.queue)

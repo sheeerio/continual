@@ -1,6 +1,8 @@
 import numpy as np
 import random
 import os
+import csv
+import fcntl
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -12,7 +14,7 @@ import math
 from collections import deque
 from config import get_parser
 from utils import feature_diagnostics, misc, schedulers, optimizers
-from models import mlp, cnn
+from models import mlp, cnn, vit
 from datasets import data_loader
 from utils.optimizers import PerLayerLyapunovScheduler
 
@@ -41,6 +43,10 @@ def set_seed(s):
 
 set_seed(config.seed)
 
+task_seed = config.task_seed if config.task_seed is not None else config.seed
+task_rng = torch.Generator()
+task_rng.manual_seed(task_seed)
+
 
 def make_diag_run_name(cfg):
     parts = [
@@ -64,6 +70,7 @@ train_dataset, test_dataset, in_ch, input_size, DATA_MEAN, DATA_STD = (
 
 config.alpha = 0.01 if config.activation == "leaky_relu" else config.alpha
 hidden = 256
+img_size = int(round((input_size / in_ch) ** 0.5))
 if config.model == "MLP":
     model = mlp.MLP(input_size, hidden, 10).to(device)
 elif config.model == "BatchNormMLP":
@@ -74,6 +81,8 @@ elif config.model == "CNN":
     model = cnn.CNN(in_ch).to(device)
 elif config.model == "BatchNormCNN":
     model = cnn.BatchNormCNN(in_ch).to(device)
+elif config.model == "ViT":
+    model = vit.ViT(in_ch, img_size).to(device)
 else:
     model = mlp.MLP(input_size, hidden, 10).to(device)
 
@@ -83,6 +92,7 @@ feature_diag_run_name = make_diag_run_name(config)
 init_params = {
     n: p.data.clone() for n, p in model.named_parameters() if p.requires_grad
 }
+id_to_name = {id(p): n for n, p in model.named_parameters() if p.requires_grad}
 if config.reg == "wass":
     for n, p0 in init_params.items():
         init_params[n] = torch.sort(p0.view(-1))[0].to(device)
@@ -109,7 +119,8 @@ if config.model in [
         model.fc2.register_forward_hook(save_activations("l2"))
     # model.fc3.register_forward_hook(save_activations("l3"))
 else:
-    model.fc1.register_forward_hook(save_activations("l1"))
+    if hasattr(model, "fc1"):
+        model.fc1.register_forward_hook(save_activations("l1"))
 
 
 def make_layer_groups(model, base_lr):
@@ -172,6 +183,11 @@ run = wandb.init(
         "spectral_lambda": config.spectral_lambda,
         "spectral_k": config.spectral_k,
         "wass_lambda": config.wass_lambda,
+        "adaptive_type": config.adaptive_type,
+        "adaptive_scope": config.adaptive_scope,
+        "adaptive_multiplier": config.adaptive_multiplier,
+        "reg_coeff": config.reg_coeff,
+        "task_seed": config.task_seed,
     },
 )
 wandb.define_metric("gradient_noise", hidden=False)
@@ -203,6 +219,7 @@ results = {
         "dormancy": [],
     }
 }
+task_acc_history = []
 
 sharp_state = misc.EMAState(alphas=(0.01, 0.05, 0.5))
 r_sharp_state = misc.EMAState(alphas=(0.01, 0.05, 0.5))
@@ -273,6 +290,8 @@ for task in range(config.runs):
             model = cnn.CNN(in_ch).to(device)
         elif config.model == "BatchNormCNN":
             model = cnn.BatchNormCNN(in_ch).to(device)
+        elif config.model == "ViT":
+            model = vit.ViT(in_ch, img_size).to(device)
         else:
             model = mlp.BatchNormMLP(input_size, hidden, 10).to(device)
         feature_diag_init_weights = feature_diagnostics.capture_initial_linear_weights(
@@ -318,7 +337,9 @@ for task in range(config.runs):
             train_dataset, batch_size=config.batch_size, shuffle=True, num_workers=4
         )
     else:
-        train_dataset = optimizers.randomize_targets(train_dataset, config.ns)
+        train_dataset = optimizers.randomize_targets(
+            train_dataset, config.ns, generator=task_rng
+        )
         # if task == 0:
         #     train_dataset = optimizers.randomize_targets(train_dataset, 0.0)
         loader = data.DataLoader(
@@ -410,7 +431,7 @@ for task in range(config.runs):
     cached_sigma_min = {}
     for epoch in range(config.epochs):
         for x, y in loader:
-            if config.model in ["CNN", "BatchNormCNN"]:
+            if config.model in ["CNN", "BatchNormCNN", "ViT"]:
                 inputs = x.to(device)
             else:
                 inputs = x.view(x.size(0), -1).to(device)
@@ -1746,7 +1767,7 @@ for task in range(config.runs):
     total, count = 0.0, 0
     with torch.no_grad():
         for x, y in eval_loader:
-            if config.model in ["CNN", "BatchNormCNN"]:
+            if config.model in ["CNN", "BatchNormCNN", "ViT"]:
                 inp = x.to(device)
             else:
                 inp = x.view(x.size(0), -1).to(device)
@@ -1765,13 +1786,18 @@ for task in range(config.runs):
     )
     aun = sum_up / total_updates
     inputs, _ = next(iter(eval_loader))
-    inputs = inputs.view(inputs.size(0), -1).to(device)
+    if config.model in ["CNN", "BatchNormCNN", "ViT"]:
+        inputs = inputs.to(device)
+    else:
+        inputs = inputs.view(inputs.size(0), -1).to(device)
     h = model(inputs)
     s = torch.linalg.svdvals(h)
     cut = s.sum() * 0.99
     j = (torch.cumsum(s, 0) >= cut).nonzero()[0].item() + 1
     effective_rank = -j / float(h.shape[1])
     steps = config.epochs * len(loader) / config.log_interval
+    task_acc_value = this_task_acc / (config.epochs * len(loader))
+    task_acc_history.append(task_acc_value)
     run.log(
         {
             "J": J,
@@ -1779,7 +1805,7 @@ for task in range(config.runs):
             "avg_norm_sharp": this_normalized_sharp / (config.epochs * len(loader)),
             "average_update_norm": aun,
             "effective_rank": effective_rank,
-            "task_acc": this_task_acc / (config.epochs * len(loader)),
+            "task_acc": task_acc_value,
             "snr_pct": 1 - (snr_sum / steps),
             # "k_rs_pct1": 1 - (k_rs_sum1 / steps),
             # "k_ss_pct1": 1 - (k_ss_sum1 / steps),
@@ -1856,6 +1882,29 @@ for task in range(config.runs):
     res["update_norm"].append(aun)
 
 wandb.finish()
+
+if config.results_csv:
+    final_acc = task_acc_history[-1]
+    acc_rel_first_task = final_acc - task_acc_history[0]
+    row = {
+        "regularizer": config.adaptive_type,
+        "model": config.model,
+        "adaptive_multiplier": config.adaptive_multiplier,
+        "reg_coeff": config.reg_coeff,
+        "seed": config.seed,
+        "dataset": config.dataset,
+        "final_acc": final_acc,
+        "acc_rel_first_task": acc_rel_first_task,
+    }
+    fieldnames = list(row.keys())
+    file_exists = os.path.exists(config.results_csv)
+    with open(config.results_csv, "a", newline="") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        if not file_exists or f.tell() == 0:
+            writer.writeheader()
+        writer.writerow(row)
+        fcntl.flock(f, fcntl.LOCK_UN)
 
 tasks = np.arange(1, len(results[config.activation]["batch_error"]) + 1)
 for m in ["batch_error", "param_norm", "update_norm"]:
