@@ -539,11 +539,12 @@ for task in range(config.runs):
                     tmp_eff_lrs = optimizers.per_layer_sgd_lr(
                         model, optimizer, step=total_updates
                     )
-
+                _skip_curv = (reg_scope != "global") and (not use_adaptive_multiplier)
                 for layer, l_params in layer_map.items():
-                    lam = optimizers.estimate_hessian_topk(
-                        model, base, l_params, k=1, iters=1
-                    )[0]
+                    if _skip_curv:
+                        lam = torch.tensor(0.0, device=device)
+                    else:
+                        lam = optimizers.estimate_hessian_topk(model, base, l_params, k=1, iters=1)[0]
                     norm_lam = optimizers.get_norm_sharpness(optimizer, lam, config)
                     l_eff_lr = tmp_eff_lrs.get(layer, optimizer.param_groups[0]["lr"])
 
@@ -1702,18 +1703,19 @@ for task in range(config.runs):
             update_norm = delta.mean().item()
             sum_up += update_norm
             total_updates += 1
-            spec_changes = []
-            for p, o in zip(params, old):
-                if p.ndim < 2:
-                    continue
-                Wp = p.data.view(p.data.shape[0], -1)   # works for Linear and Conv weights
-                Wo = o.data.view(o.data.shape[0], -1)
-                sp = optimizers.power_iteration(Wp, iters=1).pow(config.spectral_k)
-                so = optimizers.power_iteration(Wo, iters=1).pow(config.spectral_k)
-                spec_changes.append((sp - so).abs())
-
-            spec_norm_change = (torch.stack(spec_changes).mean().item()
-                                if len(spec_changes) > 0 else 0.0)
+            spec_norm_change = 0.0
+            if total_updates % config.log_interval == 0:
+                spec_changes = []
+                for p, o in zip(params, old):
+                    if p.ndim < 2:
+                        continue
+                    Wp = p.data.view(p.data.shape[0], -1)
+                    Wo = o.data.view(o.data.shape[0], -1)
+                    sp = optimizers.power_iteration(Wp, iters=1).pow(config.spectral_k)
+                    so = optimizers.power_iteration(Wo, iters=1).pow(config.spectral_k)
+                    spec_changes.append((sp - so).abs())
+                spec_norm_change = (torch.stack(spec_changes).mean().item()
+                                    if len(spec_changes) > 0 else 0.0)
 
             if total_updates % config.log_interval == 0:
                 # use_vals = { f"use_{name}": optimizers.compute_use_for_activation(h) for name, h in activations.items() }
