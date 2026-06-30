@@ -18,6 +18,8 @@ from models import mlp, cnn, vit
 from datasets import data_loader
 from utils.optimizers import PerLayerLyapunovScheduler
 
+torch.backends.cudnn.benchmark = True
+
 parser = get_parser()
 config = parser.parse_args()
 if not hasattr(config, "snr_margin"):
@@ -325,7 +327,7 @@ for task in range(config.runs):
 
     if config.dataset == "PermutedMNIST":
         loader = data.DataLoader(
-            train_dataset, batch_size=config.batch_size, shuffle=True, num_workers=4
+            train_dataset, batch_size=config.batch_size, shuffle=True, num_workers=2
         )
     elif config.dataset == "Shuffle_CIFAR":
         mapping = torch.randperm(10).tolist()
@@ -334,7 +336,7 @@ for task in range(config.runs):
             train_subset.dataset.targets[idx] = new_lbl
         train_dataset = train_subset
         loader = data.DataLoader(
-            train_dataset, batch_size=config.batch_size, shuffle=True, num_workers=4
+            train_dataset, batch_size=config.batch_size, shuffle=True, num_workers=2
         )
     else:
         train_dataset = optimizers.randomize_targets(
@@ -343,7 +345,7 @@ for task in range(config.runs):
         # if task == 0:
         #     train_dataset = optimizers.randomize_targets(train_dataset, 0.0)
         loader = data.DataLoader(
-            train_dataset, batch_size=config.batch_size, shuffle=True, num_workers=4
+            train_dataset, batch_size=config.batch_size, shuffle=True, num_workers=2
         )
 
     total_updates = 0
@@ -1078,7 +1080,7 @@ for task in range(config.runs):
                 eff_acrit_rvar10_union_sum += union_eff_gt_acrit_step_rvar10
                 eff_acrit_rsqm10_union_sum += union_eff_gt_acrit_step_rsqm10
 
-                eigs = optimizers.estimate_hessian_topk(model, loss, params, k=1)
+                eigs = optimizers.estimate_hessian_topk(model, loss, params, k=1, iters=1)
                 sharpness = eigs[0]
                 lambda_min = optimizers.estimate_hessian_min_eig(
                     model, loss, params, iters=20
@@ -1764,7 +1766,7 @@ for task in range(config.runs):
 
     model.eval()
     eval_loader = data.DataLoader(
-        train_dataset, batch_size=config.batch_size, shuffle=False
+        train_dataset, batch_size=config.batch_size, shuffle=False, num_workers=2
     )
     total, count = 0.0, 0
     with torch.no_grad():
@@ -1787,7 +1789,6 @@ for task in range(config.runs):
         .item()
     )
     aun = sum_up / total_updates
-    inputs, _ = next(iter(eval_loader))
     if config.model in ["CNN", "BatchNormCNN", "ViT"]:
         inputs = inputs.to(device)
     else:
