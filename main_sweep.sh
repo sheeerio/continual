@@ -13,7 +13,7 @@ mkdir -p "${LOG_DIR}"
 COMMON=(
   --track_coherence
   --coherence_window 100
-  --runs 5
+  --runs 10
   --epochs 200
   --ns 1.0
   --lr_schedule constant
