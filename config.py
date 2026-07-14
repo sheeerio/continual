@@ -221,6 +221,12 @@ def get_parser():
     parser.add_argument("--adaptive_scope", type=str, default="local", choices=["local", "global"], help="Scope for adaptive regularization")
     parser.add_argument("--adaptive_type", type=str, default="l2", choices=["l2", "spectral", "wass"], help="Type of adaptive regularization")
     parser.add_argument("--reg_sensitivity", type=float, default=0.001, help="Scaling factor for inverse tau penalty")
+    parser.add_argument("--adaptive_form", type=str, default="inv", choices=["inv", "saturating"], help="Form of the adaptive regularization factor")
+    parser.add_argument("--tau_ref_mode", type=str, default="median", choices=["fixed", "median"], help="How tau_ref is computed for the saturating adaptive form")
+    parser.add_argument("--tau_ref_fixed", type=float, default=1e-3, help="Fixed tau_ref value used when tau_ref_mode == 'fixed'")
+    parser.add_argument("--tau_ref_window", type=int, default=500, help="Rolling window size for median tau_ref tracking")
+    parser.add_argument("--track_coherence", action="store_true", help="Track cross-layer tau correlation structure")
+    parser.add_argument("--coherence_window", type=int, default=100, help="Rolling window size for cross-layer tau coherence tracking")
     return parser
 
     

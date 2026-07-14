@@ -93,6 +93,14 @@ def make_layer_groups(model, base_lr):
                     for layer, params in layer_map.items()]
     return layer_map, layer_groups
 layer_map, layer_groups = make_layer_groups(model, config.lr)
+if config.track_coherence:
+    coherence_tracker = optimizers.CrossLayerCoherence(
+        layer_names=list(layer_map.keys()),
+        window=config.coherence_window
+    )
+else:
+    coherence_tracker = None
+coh = None
 # ── one EMAState per layer ─────────────────────────────────────────────
 layer_states = {
     layer : misc.EMAState(alphas=(0.01, 0.05, 0.5))   # same alphas you used globally
@@ -359,6 +367,9 @@ for task in range(config.runs):
     # if task == config.runs - 1:
     #     config.epochs = 1500
     cached_sigma_min = {}
+    tau_ref_trackers = {layer: misc.RollingMedian(window=config.tau_ref_window)
+                        for layer in layer_map}
+    global_tau_ref_tracker = misc.RollingMedian(window=config.tau_ref_window)
     for epoch in range(config.epochs):
         for x, y in loader:
             if config.model in ["CNN", "BatchNormCNN"]:
@@ -436,11 +447,22 @@ for task in range(config.runs):
                     
                     # Calculate Global Penalty Factor
                     g_tau = global_scalars["tau"]
-                    g_inv_tau = 1.0 / (g_tau + 1e-12)
-                    global_factor = sensitivity * g_inv_tau
-                    
+                    if config.adaptive_form == "saturating":
+                        if config.tau_ref_mode == "median":
+                            g_tau_ref = global_tau_ref_tracker.update(g_tau)
+                            if g_tau_ref is None:
+                                g_tau_ref = config.tau_ref_fixed
+                        else:
+                            g_tau_ref = config.tau_ref_fixed
+                        global_factor = sensitivity * g_tau_ref / (g_tau + g_tau_ref)
+                    else:
+                        g_inv_tau = 1.0 / (g_tau + 1e-12)
+                        global_factor = sensitivity * g_inv_tau
+
                     if total_updates % config.log_interval == 0:
                         wandb.log({"global/inv_tau_penalty": global_factor}, commit=False)
+                        if config.adaptive_form == "saturating":
+                            wandb.log({"global/tau_ref": g_tau_ref}, commit=False)
 
                 # --- B. ITERATE LAYERS ---
                 if config.optimizer == "adam":
@@ -470,7 +492,16 @@ for task in range(config.runs):
                     else:
                         # Local Mode: Use this layer's specific volatility
                         tau = scalars["tau"]
-                        adaptive_factor = sensitivity * (1.0 / (tau + 1e-12))
+                        if config.adaptive_form == "saturating":
+                            if config.tau_ref_mode == "median":
+                                tau_ref = tau_ref_trackers[layer].update(tau)
+                                if tau_ref is None:
+                                    tau_ref = config.tau_ref_fixed
+                            else:
+                                tau_ref = config.tau_ref_fixed
+                            adaptive_factor = sensitivity * tau_ref / (tau + tau_ref)
+                        else:
+                            adaptive_factor = sensitivity * (1.0 / (tau + 1e-12))
 
                     # 3. Apply Penalty (L2 or Spectral)
                     layer_reg_val = torch.tensor(0.0, device=device)
@@ -502,6 +533,8 @@ for task in range(config.runs):
                     # Log factor occasionally
                     if total_updates % config.log_interval == 0:
                         wandb.log({f"{layer}/reg_factor": adaptive_factor}, commit=False)
+                        if reg_scope != "global" and config.adaptive_form == "saturating":
+                            wandb.log({f"{layer}/tau_ref": tau_ref}, commit=False)
 
             loss = base + reg
             params = [p for p in model.parameters() if p.requires_grad]
@@ -564,6 +597,10 @@ for task in range(config.runs):
                         eff_lr = layer_eff_lrs.get(layer, optimizer.param_groups[0]["lr"])
                         state, scalars = misc.update_stat(norm_lam, layer_states[layer], eff_lr)
                         act_state, act_scalars = misc.update_stat(lam, act_layer_states[layer], eff_lr)
+                        step_stats[layer] = {
+                            "scalars": scalars, "act_scalars": act_scalars,
+                            "lam": lam, "norm_lam": norm_lam, "eff_lr": eff_lr
+                        }
 
                     # strictly use collapse_pred for the union
                     layer_pred = int(scalars["collapse_pred2"])
@@ -735,6 +772,18 @@ for task in range(config.runs):
                 eff_acrit_rs10_union_sum += union_eff_gt_acrit_step_rs10
                 eff_acrit_rvar10_union_sum += union_eff_gt_acrit_step_rvar10
                 eff_acrit_rsqm10_union_sum += union_eff_gt_acrit_step_rsqm10
+
+                if config.track_coherence:
+                    tau_dict = {layer: step_stats[layer]["scalars"]["tau"]
+                                for layer in layer_map if layer in step_stats}
+                    coh = coherence_tracker.update(tau_dict)
+                    if coh["corr_matrix"] is not None:
+                        wandb.log({
+                            "coherence/mean_off_diag": coh["mean_off_diag"],
+                            "coherence/max_eigval": coh["max_eigval"],
+                            "coherence/min_eigval": coh["min_eigval"],
+                            "coherence/ratio": coh["max_eigval"] / max(coh["min_eigval"], 1e-8),
+                        }, commit=False)
 
                 eigs = optimizers.estimate_hessian_topk(model, loss, params, k=1)
                 sharpness = eigs[0]
@@ -1149,6 +1198,17 @@ for task in range(config.runs):
     res["batch_error"].append(J)
     res["param_norm"].append(pn)
     res["update_norm"].append(aun)
+
+    if config.track_coherence and coh is not None and coh["corr_matrix"] is not None:
+        fig, ax = plt.subplots()
+        im = ax.imshow(coh["corr_matrix"], vmin=-1, vmax=1, cmap="RdBu_r")
+        ax.set_xticks(range(len(coh["layer_names"])))
+        ax.set_yticks(range(len(coh["layer_names"])))
+        ax.set_xticklabels(coh["layer_names"], rotation=45)
+        ax.set_yticklabels(coh["layer_names"])
+        plt.colorbar(im)
+        wandb.log({f"coherence/matrix_task_{task}": wandb.Image(fig)})
+        plt.close(fig)
 
 wandb.finish()
 

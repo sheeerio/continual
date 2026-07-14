@@ -42,6 +42,22 @@ class EMAState:
             self.var2 = [0.0] * len(self.alphas)
 
 
+class RollingMedian:
+    """Rolling median over a fixed-size window, with a cold-start fallback."""
+
+    def __init__(self, window: int = 500, min_samples: int = 10):
+        self.window = window
+        self.min_samples = min_samples
+        self.values: Deque[float] = deque(maxlen=window)
+
+    def update(self, value: float) -> float | None:
+        """Append value and return the current median, or None until warmed up."""
+        self.values.append(float(value))
+        if len(self.values) < self.min_samples:
+            return None
+        return float(np.median(self.values))
+
+
 def update_stat(x: float,
                 state: EMAState,
                 effective_lr: float,

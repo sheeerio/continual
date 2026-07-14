@@ -783,6 +783,70 @@ class SNRProgressPredictor:
 
         return pred, pred_real, meanT, thresh, conf
 
+class CrossLayerCoherence:
+    """
+    Tracks per-layer tau over a rolling window and reports the pairwise
+    correlation structure across layers (systemic vs. independent motion).
+    """
+    def __init__(self, layer_names, window: int = 100):
+        self.layer_names = list(layer_names)
+        self.window = int(window)
+        self.history: Dict[str, Deque[float]] = {
+            layer: deque(maxlen=self.window) for layer in self.layer_names
+        }
+
+    def update(self, tau_dict: Dict[str, float]) -> Dict[str, object]:
+        for layer in self.layer_names:
+            if layer in tau_dict:
+                self.history[layer].append(float(tau_dict[layer]))
+
+        empty = {
+            "corr_matrix": None,
+            "mean_off_diag": None,
+            "max_eigval": None,
+            "min_eigval": None,
+            "layer_names": self.layer_names,
+        }
+
+        L = len(self.layer_names)
+        if L == 0 or any(len(self.history[layer]) < self.window for layer in self.layer_names):
+            return empty
+
+        data = np.stack(
+            [np.asarray(self.history[layer], dtype=np.float64) for layer in self.layer_names],
+            axis=0,
+        )  # (L, W)
+        stds = data.std(axis=1)
+
+        corr = np.eye(L)
+        for i in range(L):
+            for j in range(i + 1, L):
+                if stds[i] == 0.0 or stds[j] == 0.0:
+                    c = 0.0
+                else:
+                    c = float(np.corrcoef(data[i], data[j])[0, 1])
+                    if np.isnan(c):
+                        c = 0.0
+                corr[i, j] = c
+                corr[j, i] = c
+
+        if L > 1:
+            off_diag_mask = ~np.eye(L, dtype=bool)
+            mean_off_diag = float(corr[off_diag_mask].mean())
+        else:
+            mean_off_diag = 0.0
+
+        eigvals = np.linalg.eigvalsh(corr)
+
+        return {
+            "corr_matrix": corr,
+            "mean_off_diag": mean_off_diag,
+            "max_eigval": float(eigvals[-1]),
+            "min_eigval": float(eigvals[0]),
+            "layer_names": self.layer_names,
+        }
+
+
 def grad_variance_within_batch_by_layer(model, loss_fn, inputs, targets, layer_map):
     """
     Per-layer within-minibatch gradient variance.
