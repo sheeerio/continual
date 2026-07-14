@@ -55,6 +55,17 @@ elif config.model == "BatchNormCNN":
 else:
     model = mlp.MLP(input_size, hidden, 10).to(device)
 
+if config.freeze_layer is not None and config.freeze_layer != "None":
+    print(f"❄️ Experiment: Freezing layer containing string '{config.freeze_layer}'")
+    frozen_count = 0
+    frozen_scalars = 0
+    for name, p in model.named_parameters():
+        if config.freeze_layer in name:
+            p.requires_grad = False
+            frozen_count += 1
+            frozen_scalars += p.numel()
+    print(f"❄️ Frozen {frozen_count} tensors, {frozen_scalars} parameters.")
+
 init_params = {
     n: p.data.clone() for n, p in model.named_parameters() if p.requires_grad
 }
@@ -109,31 +120,67 @@ wd = config.l2_lambda if config.reg == "l2" else 0.0
 if config.optimizer == "adam":
     optimizer = optim.Adam(layer_groups, lr=config.lr, weight_decay=wd, betas=(0.9, config.beta2))
 elif config.optimizer == "sgd": 
-    optimizer = torch.optim.SGD(layer_groups, lr=config.lr, weight_decay=wd, momentum=0.9)
+    optimizer = torch.optim.SGD(layer_groups, lr=config.lr, weight_decay=wd)
 elif config.optimizer == "clamped_adam":
     optimizer = optimizers.ClampedAdam(layer_groups, lr=config.lr, lr_min=1e-3, lr_max=1.1)
 
-# how often to refresh expensive curvature stats (make this >> 1)
-stats_interval = getattr(config, "stats_interval", config.log_interval)  # e.g., 100 or 200
+class ExperimentalMultiScheduler:
+    def __init__(self, optimizer, layer_groups, config_str, epochs, steps_per_epoch):
+        self.optimizer = optimizer
+        self.epochs = epochs
+        self.total_steps = epochs * steps_per_epoch
+        self.schedulers = []
+        
+        # Parse config: "fc1:wsd,fc3:cosine" -> {'fc1': 'wsd', 'fc3': 'cosine'}
+        self.sched_map = {}
+        if config_str and config_str != "none":
+            for part in config_str.split(','):
+                if ':' in part:
+                    layer, sched_type = part.split(':')
+                    self.sched_map[layer.strip()] = sched_type.strip()
 
-# cache per-layer curvature stats + adaptive factors so you don't recompute every step
-layer_cache = {
-    layer: {
-        "adaptive_factor": 0.0,      # the scale (sensitivity / tau)
-        "adaptive_wd": wd,           # only used if adaptive_type == "l2"
-        "scalars": None,
-        "act_scalars": None,
-        "lam": None,
-        "norm_lam": None,
-        "eff_lr": None,
-    }
-    for layer in layer_map
-}
+        # Assign lambdas to each group based on layer_name
+        self.lambdas = []
+        for group in optimizer.param_groups:
+            layer_name = group.get('layer', 'default')
+            sched_type = self.sched_map.get(layer_name, 'constant') # Default to constant if not specified
+            
+            if sched_type == 'wsd':
+                # Warmup (10%) -> Stable (70%) -> Decay (20%)
+                def wsd_lambda(step):
+                    pct = step / self.total_steps
+                    if pct < 0.1: return pct / 0.1 # Warmup
+                    elif pct < 0.8: return 1.0     # Stable
+                    else: return max(0.0, (1.0 - pct) / 0.2) # Decay
+                self.lambdas.append(wsd_lambda)
+                
+            elif sched_type == 'cosine':
+                def cos_lambda(step):
+                    return 0.5 * (1 + math.cos(math.pi * step / self.total_steps))
+                self.lambdas.append(cos_lambda)
+                
+            elif sched_type == 'power':
+                def pow_lambda(step):
+                    return (1 - step / self.total_steps) ** 2
+                self.lambdas.append(pow_lambda)
+            
+            else: # Constant
+                self.lambdas.append(lambda step: 1.0)
 
-# optional: if you ever use adaptive wass and need names
-id_to_name = {id(p): n for n, p in model.named_parameters() if p.requires_grad}
+        # Create the actual scheduler object
+        self.main_scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=self.lambdas)
 
+    def step(self):
+        self.main_scheduler.step()
 
+# Setup Scheduler
+steps_per_epoch = len(train_dataset) // config.batch_size
+if config.layer_sched_config != "none":
+    scheduler = ExperimentalMultiScheduler(optimizer, layer_groups, config.layer_sched_config, config.epochs, steps_per_epoch)
+else:
+    # Fallback to existing logic or None
+    scheduler = None
+#
 # base_optimizer = optimizer
 # optimizer = optimizers.CVSharpnessController(
 #     base_optimizer,
@@ -145,7 +192,7 @@ id_to_name = {id(p): n for n, p in model.named_parameters() if p.requires_grad}
 # )
 
 run = wandb.init(
-    project=f"experiments",
+    project=f"conference",
     entity="sheerio",
     group=config.exp_name,
     name=f"{config.name}",
@@ -265,17 +312,18 @@ for task in range(config.runs):
             model = cnn.BatchNormCNN(in_ch).to(device)
         else:
             model = mlp.BatchNormMLP(input_size, hidden, 10).to(device)
+        layer_map, layer_groups = make_layer_groups(model, config.lr)
         if config.optimizer == "adam":
             optimizer = optim.Adam(layer_groups, lr=config.lr, weight_decay=wd, betas=(config.beta1, config.beta2))
         elif config.optimizer == "sgd":
-            optimizer = optim.SGD(layer_groups, lr=config.lr, weight_decay=wd, momentum=0.9)
+            optimizer = optim.SGD(layer_groups, lr=config.lr, weight_decay=wd)
     if config.reset_optimizer:
         layer_map, layer_groups = make_layer_groups(model, config.lr)
         # Recreate optimizer using layer_groups (not model.parameters())
         if config.optimizer == "adam":
             optimizer = optim.Adam(layer_groups, lr=config.lr, weight_decay=wd, betas=(config.beta1, config.beta2))
         elif config.optimizer == "sgd":
-            optimizer = optim.SGD(layer_groups, lr=config.lr, weight_decay=wd, momentum=0.9)
+            optimizer = optim.SGD(layer_groups, lr=config.lr, weight_decay=wd)
         elif config.optimizer == "clamped_adam":
             optimizer = optimizers.ClampedAdam(layer_groups, lr=config.lr, lr_min=1e-2, lr_max=0.8)
 
@@ -308,12 +356,13 @@ for task in range(config.runs):
         )
 
     total_updates = 0
+    active_params = [p for p in model.parameters() if p.requires_grad]
     if total_updates % config.log_interval == 0:
         hessian_rank = optimizers.empirical_fischer_rank(model, train_dataset, device, cfg=config)
 
     model.train()
     ly_sched = None
-    scheduler = None
+    # scheduler = None
     total_steps = config.epochs * math.ceil(len(train_dataset) / config.batch_size)
     if config.lr_schedule == "linear":
         initial_lr = config.lr
@@ -394,7 +443,7 @@ for task in range(config.runs):
             acc = (preds == labels).float().mean().item()
             this_task_acc += acc
             base = criterion(out, labels)
-            reg = torch.tensor(0.01, device=device) if config.adaptive_type == "l2" else torch.tensor(0.0, device=device)
+            reg = torch.tensor(0.0, device=device)
             if config.reg == "l2_init":
                 for n, p in model.named_parameters():
                     if p.requires_grad:
@@ -435,123 +484,125 @@ for task in range(config.runs):
                         reg += (W.t() @ W - I).pow(2).sum()
                 reg *= config.ortho_lambda
             
-            step_stats = {}
+            step_stats = {} 
+
             if getattr(config, "adaptive_reg", False):
-                reg_scope   = getattr(config, "adaptive_scope", "local")   # "global" or "local"
-                reg_type    = getattr(config, "adaptive_type", "l2")       # "l2" / "spectral" / "wass"
+                # Configuration Defaults
+                reg_scope = getattr(config, "adaptive_scope", "local") # "global" or "local"
+                reg_type  = getattr(config, "adaptive_type", "l2")     # "l2" or "spectral"
                 sensitivity = getattr(config, "reg_sensitivity", 0.001)
 
-                refresh_stats = (total_updates % stats_interval == 0)
+                # --- A. CALCULATE GLOBAL FACTOR (IF GLOBAL MODE) ---
+                global_factor = None
+                if reg_scope == "global":
+                    # Estimate global sharpness on Task Loss (base)
+                    # We use the existing global 'sharp_state' defined in your setup
+                    global_lam = optimizers.estimate_hessian_topk(model, base, params, k=1, iters=1)[0]
+                    global_norm_lam = optimizers.get_norm_sharpness(optimizer, global_lam, config)
+                    global_eff_lr = effective_lr # Calculated earlier in loop or re-calc here
+                    
+                    # Update global EMA state
+                    sharp_state, global_scalars = misc.update_stat(global_norm_lam, sharp_state, global_eff_lr)
+                    
+                    # Calculate Global Penalty Factor
+                    g_tau = global_scalars["tau"]
+                    g_inv_tau = 1.0 / (g_tau + 1e-12)
+                    global_factor = sensitivity * g_inv_tau
+                    
+                    if total_updates % config.log_interval == 0:
+                        wandb.log({"global/inv_tau_penalty": global_factor}, commit=False)
 
-                # Always have some cached stats available for later logging loop (cheap)
-                for layer in layer_map:
-                    cached = layer_cache.get(layer, None)
-                    if cached and ("scalars" in cached):
-                        step_stats[layer] = {
-                            "scalars":   cached["scalars"],
-                            "act_scalars": cached["act_scalars"],
-                            "lam":       cached["lam"],
-                            "norm_lam":  cached["norm_lam"],
-                            "eff_lr":    cached.get("eff_lr", optimizer.param_groups[0]["lr"]),
-                        }
+                # --- B. ITERATE LAYERS ---
+                if config.optimizer == "adam":
+                    tmp_eff_lrs = optimizers.per_layer_effective_lr(model, optimizer)
+                else: 
+                    tmp_eff_lrs = optimizers.per_layer_sgd_lr(model, optimizer, step=total_updates)
 
-                # Only do expensive Hessian stuff occasionally
-                if refresh_stats:
-                    # per-layer effective lr (cheap-ish)
-                    if config.optimizer == "adam":
-                        tmp_eff_lrs = optimizers.per_layer_effective_lr(model, optimizer)
-                    else:
-                        tmp_eff_lrs = optimizers.per_layer_sgd_lr(model, optimizer, step=total_updates)
+                for layer, l_params in layer_map.items():
+                    # 1. Calculate Stats (Always needed for logging/local reg)
+                    lam = optimizers.estimate_hessian_topk(model, base, l_params, k=1, iters=1)[0]
+                    norm_lam = optimizers.get_norm_sharpness(optimizer, lam, config)
+                    l_eff_lr = tmp_eff_lrs.get(layer, optimizer.param_groups[0]["lr"])
+                    
+                    # Update Local State
+                    state, scalars = misc.update_stat(norm_lam, layer_states[layer], l_eff_lr)
+                    act_state, act_scalars = misc.update_stat(lam, act_layer_states[layer], l_eff_lr)
 
-                    # --- A) global factor (only if requested) ---
-                    global_factor = None
+                    # Cache for logging loop
+                    step_stats[layer] = {
+                        "scalars": scalars, "act_scalars": act_scalars,
+                        "lam": lam, "norm_lam": norm_lam, "eff_lr": l_eff_lr
+                    }
+
+                    # 2. Determine Adaptive Factor
                     if reg_scope == "global":
-                        params_all = [p for p in model.parameters() if p.requires_grad]
-                        global_lam = optimizers.estimate_hessian_topk(model, base, params_all, k=1, iters=1)[0]
-                        global_norm_lam = optimizers.get_norm_sharpness(optimizer, global_lam, config)
-
-                        # compute effective lr here (your old code used effective_lr before it existed)
-                        global_eff_lr = optimizers.compute_effective_lr(
-                            optimizer, cfg=config, step=total_updates, sgd_mode="time"
-                        )
-
-                        sharp_state, global_scalars = misc.update_stat(global_norm_lam, sharp_state, global_eff_lr)
+                        # Global Mode
                         g_tau = global_scalars["tau"]
-                        global_factor = float(sensitivity * (1.0 / (g_tau + 1e-12)))
+                        
+                        # OLD: Penalize Chaos (1/tau)
+                        # global_factor = sensitivity * (1.0 / (g_tau + 1e-12))
+                        
+                        # NEW: Penalize Rigidity (log(tau))
+                        # If tau is high (rigid), reg increases to force movement/simplify geometry
+                        global_factor = sensitivity * math.log(1.0 + g_tau)
+                        
+                        adaptive_factor = global_factor
+                    else:
+                        # Local Mode
+                        tau = scalars["tau"]
+                        
+                        # OLD: Penalize Chaos
+                        # adaptive_factor = sensitivity * (1.0 / (tau + 1e-12))
+                        
+                        # NEW: Penalize Rigidity (log(tau))
+                        adaptive_factor = sensitivity * math.log(1.0 + tau)
 
-                        if total_updates % config.log_interval == 0:
-                            wandb.log({"global/inv_tau_penalty": global_factor}, commit=False)
+                    # 3. Apply Penalty (L2 or Spectral)
+                    layer_reg_val = torch.tensor(0.0, device=device)
+                    
+                    if reg_type == "spectral":
+                        # Spectral Loss: (sigma^k - 1)^2
+                        for p in l_params:
+                            if p.ndim >= 2 and p.requires_grad:
+                                sigma = optimizers.power_iteration(p, iters=1)
+                                layer_reg_val += (sigma.pow(config.spectral_k) - 1.0).pow(2)
+                    elif reg_type == "wass":
+                        # Adaptive Wasserstein: (sort(p) - sort(p0))^2
+                        # Matches your paper's static implementation but scaled dynamically
+                        for p in l_params:
+                            if p.requires_grad:
+                                name = id_to_name.get(id(p))
+                                if name in init_params:
+                                    p_sorted = torch.sort(p.view(-1))[0]
+                                    p0 = init_params[name]
+                                    if config.reg != "wass":
+                                        p0 = torch.sort(p0.view(-1))[0]
+                                        
+                                    layer_reg_val += (p_sorted - p0).pow(2).sum()
+                    else: 
+                        # Default L2 Loss
+                        layer_reg_val = sum(p.pow(2).sum() for p in l_params if p.requires_grad)
+                    reg += adaptive_factor * layer_reg_val
 
-                    # --- B) per-layer refresh ---
-                    for layer, l_params in layer_map.items():
-                        lam = optimizers.estimate_hessian_topk(model, base, l_params, k=1, iters=1)[0]
-                        norm_lam = optimizers.get_norm_sharpness(optimizer, lam, config)
-                        l_eff_lr = float(tmp_eff_lrs.get(layer, optimizer.param_groups[0]["lr"]))
+                    # Log factor occasionally
+                    if total_updates % config.log_interval == 0:
+                        wandb.log({f"{layer}/reg_factor": adaptive_factor}, commit=False)
 
-                        # IMPORTANT: write back states (your old code computed `state` but didn't store it)
-                        layer_states[layer], scalars = misc.update_stat(norm_lam, layer_states[layer], l_eff_lr)
-                        act_layer_states[layer], act_scalars = misc.update_stat(lam, act_layer_states[layer], l_eff_lr)
-
-                        if reg_scope == "global":
-                            adaptive_factor = float(global_factor)
-                        else:
-                            tau = scalars["tau"]
-                            adaptive_factor = float(sensitivity * (1.0 / (tau + 1e-12)))
-
-                        # cache for later log loop (so it doesn't recompute)
-                        step_stats[layer] = {
-                            "scalars": scalars, "act_scalars": act_scalars,
-                            "lam": float(lam), "norm_lam": float(norm_lam), "eff_lr": l_eff_lr
-                        }
-                        layer_cache[layer] = step_stats[layer] | {"adaptive_factor": adaptive_factor}
-
-                        # ---- APPLY REG ----
-                        if reg_type == "l2":
-                            # FAST PATH: do L2 via per-layer weight_decay instead of adding to `reg`
-                            # (requires your param_groups have "layer" keys, which they do)
-                            pass
-                        else:
-                            # SLOWER: only apply these penalties on refresh (otherwise you die)
-                            layer_reg_val = torch.tensor(0.0, device=device)
-
-                            if reg_type == "spectral":
-                                for p in l_params:
-                                    if p.ndim >= 2 and p.requires_grad:
-                                        sigma = optimizers.power_iteration(p, iters=1)
-                                        layer_reg_val += (sigma.pow(config.spectral_k) - 1.0).pow(2)
-
-                            elif reg_type == "wass":
-                                for p in l_params:
-                                    if p.requires_grad:
-                                        name = id_to_name.get(id(p))
-                                        if name in init_params:
-                                            p_sorted = torch.sort(p.view(-1))[0]
-                                            p0 = init_params[name]
-                                            p0_sorted = torch.sort(p0.view(-1))[0]  # be explicit
-                                            layer_reg_val += (p_sorted - p0_sorted).pow(2).sum()
-                            else:
-                                layer_reg_val = sum(p.pow(2).sum() for p in l_params if p.requires_grad)
-
-                            reg += adaptive_factor * layer_reg_val
-
-                        if total_updates % config.log_interval == 0:
-                            wandb.log({f"{layer}/reg": reg}, commit=False)
-
-                    # If L2: actually set per-layer weight_decay now (cheap)
-                    if reg_type == "l2":
-                        for g in optimizer.param_groups:
-                            layer = g.get("layer", None)
-                            if layer is None:
-                                continue
-                            af = float(layer_cache[layer]["adaptive_factor"])
-                            g["weight_decay"] = float(wd + af)
-                            if total_updates % config.log_interval == 0:
-                                wandb.log({f"{layer}/adaptive_wd": g["weight_decay"]}, commit=False)
-
-
+            hessian_penalty = torch.tensor(0.0, device=device)
+            current_lr = optimizer.param_groups[0]["lr"] 
+            
+            # Need effective LR for Hard Cap
+            eff_lr_val = optimizers.compute_effective_lr(optimizer, cfg=config, step=total_updates)
+            
+            if config.hessian_cap_type == "soft":
+                # Add differentiable penalty to loss
+                # Hessian calculation is expensive, maybe do it every step or strided? Doing every step for correctness.
+                spec_norm = optimizers.differentiable_spectral_norm(model, base, active_params, iters=1)
+                hessian_penalty = config.hessian_cap_val * spec_norm
+                reg += hessian_penalty
             loss = base + reg
-            params = [p for p in model.parameters() if p.requires_grad]
-            old = [p.data.clone() for p in params]
+            all_params = [p for p in model.parameters() if p.requires_grad]
+            old_all = [p.data.clone() for p in all_params]
 
             # nus = [
             #     optimizer.state[p]["exp_avg_sq"]
@@ -594,7 +645,7 @@ for task in range(config.runs):
                 union_eff_gt_acrit_step_rvar10 = 0
                 union_eff_gt_acrit_step_rsqm10 = 0
 
-                for layer, params in layer_map.items():
+                for layer, layer_params in layer_map.items():
                     if layer in step_stats:
                         # REUSE: Don't update state again
                         cached = step_stats[layer]
@@ -605,7 +656,7 @@ for task in range(config.runs):
                         eff_lr = cached["eff_lr"]
                     else:
                         # CALCULATE: Adaptive Reg was OFF, so we must calculate now for logging
-                        lam = optimizers.estimate_hessian_topk(model, base, params, k=1, iters=1)[0]
+                        lam = optimizers.estimate_hessian_topk(model, base, layer_params, k=1, iters=1)[0]
                         norm_lam = optimizers.get_norm_sharpness(optimizer, lam, config)
                         eff_lr = layer_eff_lrs.get(layer, optimizer.param_groups[0]["lr"])
                         state, scalars = misc.update_stat(norm_lam, layer_states[layer], eff_lr)
@@ -616,7 +667,7 @@ for task in range(config.runs):
                     union_pred_step = max(union_pred_step, layer_pred)
 
                     # ---- per-layer alpha_crit_s (unchanged) ----
-                    gi = torch.autograd.grad(loss, params, retain_graph=True, allow_unused=False)
+                    gi = torch.autograd.grad(loss, layer_params, retain_graph=True, allow_unused=False)
                     g_layer_sq = float(torch.cat([g.contiguous().view(-1) for g in gi]).pow(2).sum().item())
 
                     sigma2_l = float(layer_sigma2_mb.get(layer, 0.0))
@@ -639,7 +690,7 @@ for task in range(config.runs):
                     s_rsqm_sigma2_l10 = sigma2_l + 20.0 * g_layer_sq * act_scalars["sq_mean"]
 
                     r = (sigma2_l / max(1, inputs.size(0))) / (g_layer_sq + 1e-12) + 1e-12
-                    eta_crit = min(0.8/r, 2/(norm_lam * (1 + r + 1e-12)))
+                    eta_crit = min(0.8/r, 2/(norm_lam * (1 + r)))
 
                     B = int(inputs.size(0))
                     alpha_crit_t = (B * g_layer_sq) / max(sigma2_l, 1e-12)
@@ -701,6 +752,7 @@ for task in range(config.runs):
                         f"{layer}/cv"          : scalars["lam_cv"],
                         f"{layer}/eff_lr"      : eff_lr,
                         f"{layer}/predict"     : layer_pred,
+                        f"{layer}/alpha_crit_t": alpha_crit_t,
                         # f"{layer}/alpha_crit_s": float(alpha_crit_s_layer),
                         f"{layer}/alpha_crit_scv1": float(alpha_crit_scv_layer1),
                         f"{layer}/alpha_crit_ss1": float(alpha_crit_ss_layer1),
@@ -721,7 +773,7 @@ for task in range(config.runs):
                         "reg"                  : reg
                     })
 
-                    if config.lr_schedule == "pl_lyapunov" and task > 0:
+                    if config.lr_schedule == "pl_lyapunov":
                         # if task <= 2:
                         if config.param == "sqm10":
                             lr_star = pl_scheduler.step(layer, eff_lr, alpha_crit_sqm_layer10, total_updates, total_steps)
@@ -782,9 +834,9 @@ for task in range(config.runs):
                 eff_acrit_rvar10_union_sum += union_eff_gt_acrit_step_rvar10
                 eff_acrit_rsqm10_union_sum += union_eff_gt_acrit_step_rsqm10
 
-                eigs = optimizers.estimate_hessian_topk(model, loss, params, k=1)
+                eigs = optimizers.estimate_hessian_topk(model, loss, all_params, k=1)
                 sharpness = eigs[0]
-                lambda_min = optimizers.estimate_hessian_min_eig(model, loss, params, iters=20)
+                lambda_min = optimizers.estimate_hessian_min_eig(model, loss, all_params, iters=20)
 
                 norm_sharpness = optimizers.get_norm_sharpness(optimizer, sharpness, config)
                 # lambda_min_norm = optimizers.get_norm_sharpness(optimizer, lambda_min, config)
@@ -804,7 +856,7 @@ for task in range(config.runs):
             # Sharpness Aware Minimization
             if config.sam:
                 loss.backward(create_graph=True)
-                grads = torch.autograd.grad(loss, params, create_graph=True)
+                grads = torch.autograd.grad(loss, all_params, create_graph=True)
                 grad_flat = torch.cat([g.view(-1) for g in grads])
                 grad_norm = grad_flat.norm() + 1e-12
                 epsilons = [(rho / grad_norm) * g for g in grads]
@@ -820,10 +872,31 @@ for task in range(config.runs):
                     p.data.sub_(e)
 
             else:
+                lambda_1 = None
+                if config.hessian_cap_type == "hard":
+                    # compute BEFORE backward (do NOT wrap in no_grad)
+                    top_eigs = optimizers.estimate_hessian_topk(model, base, active_params, k=1, iters=1)
+                    lambda_1 = float(top_eigs[0])
                 loss.backward()
+                if config.hessian_cap_type == "hard":
+                    epsilon = 0.1
+                    stability_limit = config.hessian_cap_val - epsilon
+                    if eff_lr_val * lambda_1 > stability_limit:
+                        target_eff_lr = stability_limit / (lambda_1 + 1e-12)
+                        scale_factor = target_eff_lr / (eff_lr_val + 1e-12)
+                        for g in optimizer.param_groups:
+                            g["lr"] *= scale_factor
+            
+                if config.normalize_gradients:
+                    total_norm = torch.norm(torch.stack([
+                        p.grad.norm() for p in model.parameters() if p.grad is not None
+                    ]))
+                    if total_norm > 1e-12:
+                        for p in model.parameters():
+                            if p.grad is not None:
+                                p.grad.data.div_(total_norm / 2) # p / ||p||
                 if total_updates % config.log_interval == 0:
-                    params = [p for p in model.parameters() if p.requires_grad]
-                    grad_flat = torch.cat([p.grad.view(-1) for p in params])
+                    grad_flat = torch.cat([p.grad.view(-1) for p in all_params])
 
                     # 1) use the *current* grads to get ||g||^2 BEFORE any SNR math
                     true_grad_norm_sq = float(grad_flat.pow(2).sum().item())
@@ -1038,6 +1111,14 @@ for task in range(config.runs):
                     else:
                         log_extra  = {}
                 optimizer.step()
+                if config.hessian_cap_type == "hard":
+                    if eff_lr_val * lambda_1 > stability_limit:
+                        # Reset to schedule value
+                        # (Simplified: assuming constant or handled by scheduler next step. 
+                        # If using a scheduler, it's safer to let the scheduler set it back, 
+                        # but here we manually revert if we want to "cap" only when violating).
+                        for g in optimizer.param_groups:
+                            g['lr'] = g['lr'] / scale_factor
                 
                 
                 # betas scheduling
@@ -1060,7 +1141,7 @@ for task in range(config.runs):
                         p.data.add_(config.sp_noise_std * torch.randn_like(p.data))
 
             delta = torch.cat(
-                [(p.data - o).view(-1).abs() for p, o in zip(params, old)]
+                [(p.data - o).view(-1).abs() for p, o in zip(all_params, old_all)]
             )
             update_norm = delta.mean().item()
             sum_up += update_norm
@@ -1075,7 +1156,7 @@ for task in range(config.runs):
                         x += 1
                         gg += optimizers.power_iteration(p, 1).pow(config.spectral_k)
                 gg = gg / x
-                wn = torch.cat([p.data.view(-1).abs() for p in params]).mean().item()
+                wn = torch.cat([p.data.view(-1).abs() for p in all_params]).mean().item()
                 log = {
                     "acc": acc,
                     "loss": loss.item(),
@@ -1106,8 +1187,6 @@ for task in range(config.runs):
                 #     h = activations["l1"]
                 #     use1 = compute_use_for_activation(h); log["use_l1"]=use1
                 run.log(log)
-        if scheduler is not None:
-            scheduler.step()
 
 
     model.eval()
@@ -1152,22 +1231,22 @@ for task in range(config.runs):
             "effective_rank": effective_rank,
             "task_acc": this_task_acc / (config.epochs * len(loader)),
             "snr_pct": 1 - (snr_sum / steps),
-            "k_rs_pct1": 1 - (k_rs_sum1 / steps),
-            "k_ss_pct1": 1 - (k_ss_sum1 / steps),
-            "k_rs_pct10": 1 - (k_rs_sum10 / steps),
-            "k_ss_pct10": 1 - (k_ss_sum10 / steps),
-            "s_scv_pct10": 1 - (s_scv_sum10 / steps),
-            "s_svar_pct10": 1 - (s_svar_sum10 / steps),
-            "s_rcv_pct10": 1 - (s_rcv_sum10 / steps),
-            "s_rvar_pct10": 1 - (s_rvar_sum10 / steps),
-            "s_scv_pct1": 1 - (s_scv_sum1 / steps),
-            "s_svar_pct1": 1 - (s_svar_sum1 / steps),
-            "s_rcv_pct1": 1 - (s_rcv_sum1 / steps),
-            "s_rvar_pct1": 1 - (s_rvar_sum1 / steps),
-            "s_sqm_pct1": 1 - (s_sqm_sum1 / steps),
-            "s_rsqm_pct1": 1 - (s_rsqm_sum1 / steps),
-            "s_sqm_pct10": 1 - (s_sqm_sum10 / steps),
-            "s_rsqm_pct10": 1 - (s_rsqm_sum10 / steps),
+            # "k_rs_pct1": 1 - (k_rs_sum1 / steps),
+            # "k_ss_pct1": 1 - (k_ss_sum1 / steps),
+            # "k_rs_pct10": 1 - (k_rs_sum10 / steps),
+            # "k_ss_pct10": 1 - (k_ss_sum10 / steps),
+            # "s_scv_pct10": 1 - (s_scv_sum10 / steps),
+            # "s_svar_pct10": 1 - (s_svar_sum10 / steps),
+            # "s_rcv_pct10": 1 - (s_rcv_sum10 / steps),
+            # "s_rvar_pct10": 1 - (s_rvar_sum10 / steps),
+            # "s_scv_pct1": 1 - (s_scv_sum1 / steps),
+            # "s_svar_pct1": 1 - (s_svar_sum1 / steps),
+            # "s_rcv_pct1": 1 - (s_rcv_sum1 / steps),
+            # "s_rvar_pct1": 1 - (s_rvar_sum1 / steps),
+            # "s_sqm_pct1": 1 - (s_sqm_sum1 / steps),
+            # "s_rsqm_pct1": 1 - (s_rsqm_sum1 / steps),
+            # "s_sqm_pct10": 1 - (s_sqm_sum10 / steps),
+            # "s_rsqm_pct10": 1 - (s_rsqm_sum10 / steps),
             # "k_snr_pct": 1 - (k_snr_sum / steps),
             # "s_snr_pct": 1 - (s_snr_sum / steps),
             "ly_snr_pct": 1 - (ly_snr_sum / steps),

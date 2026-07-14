@@ -9,35 +9,32 @@ from collections import deque
 from typing import Deque, Dict, Tuple, List
 from utils.misc import EMAState
 
-# def power_iteration_sigma_min(W: torch.Tensor,
-#                                iters: int = 3,
-#                                eps: float = 1e-6) -> torch.Tensor:
-#     """
-#     Approximate the *smallest* singular value of W via inverse power-iteration
-#     on (WᵀW).  Works for any 2-D parameter tensor.
 
-#     Cost: one solve per iteration; for mid-sized layers (≤1 k dims) 2–3 iters
-#     add <0.2 ms on GPU.
-#     """
-#     # (1) build symmetric positive-definite matrix
-#     WT_W = W.T @ W                         # shape (in, in)
+def differentiable_spectral_norm(model, loss_val, params, iters=1):
+    """Computes the top eigenvalue in a differentiable way for regularization."""
+    # Create random vector
+    v = [torch.randn_like(p) for p in params]
+    v = [x / torch.sqrt(sum([y.pow(2).sum() for y in v])) for x in v] # normalize
+    
+    for _ in range(iters):
+        # Matrix-vector product via double backward (Hv)
+        grads = torch.autograd.grad(loss_val, params, create_graph=True, retain_graph=True)
+        # Dot product of grad and v
+        gv = sum([(g * x).sum() for g, x in zip(grads, v)])
+        # Backward again to get Hv
+        Hv = torch.autograd.grad(gv, params, create_graph=True, retain_graph=True)
+        
+        # New v is Hv (normalized)
+        norm = torch.sqrt(sum([x.pow(2).sum() for x in Hv]))
+        v = [x / (norm + 1e-12) for x in Hv]
+    
+    # Rayleigh quotient: v^T H v
+    grads = torch.autograd.grad(loss_val, params, create_graph=True, retain_graph=True)
+    gv = sum([(g * x).sum() for g, x in zip(grads, v)])
+    Hv = torch.autograd.grad(gv, params, create_graph=True, retain_graph=True)
+    spectral_norm = sum([(x * y).sum() for x, y in zip(v, Hv)])
+    return spectral_norm
 
-#     # (2) start with a random unit vector
-#     v = torch.randn(WT_W.shape[0], device=W.device)
-#     v = v / v.norm()
-
-#     # (3) inverse power-iteration:   x_{k+1} = (WT_W + εI)^{-1} v_k
-#     #     solving a linear system is faster & stabler than an explicit inverse
-#     I = torch.eye(WT_W.shape[0], device=W.device)
-
-#     for _ in range(iters):
-#         # linear solve; autograd-friendly
-#         v = torch.linalg.solve(WT_W + eps * I, v)
-#         v = v / (v.norm() + 1e-12)
-
-#     # Rayleigh quotient → λ_min of WT_W, so √ gives σ_min
-#     sigma_min_sq = torch.dot(v, WT_W @ v)
-#     return torch.sqrt(sigma_min_sq + 1e-12)
 def power_iteration_sigma_min(W: torch.Tensor,
                                iters: int = 3,
                                shift_mult: float = 1e-3) -> torch.Tensor:
@@ -536,7 +533,7 @@ def per_layer_effective_lr(
             name = id2name.get(id(p))
             if name is None:
                 continue
-            layer = name.split(".", 1)[0]
+            layer = ".".join(name.split('.')[:2])
             layer_sum[layer] = layer_sum.get(layer, 0.0) + step_clamped
             layer_cnt[layer] = layer_cnt.get(layer, 0) + 1
 
@@ -749,6 +746,36 @@ def grad_variance_within_batch(model, loss_fn, inputs, targets):
     sigma2 = ((G - g_bar)**2).sum(dim=1).mean().item()   # scalar
 
     return sigma2
+
+def grad_variance_by_layer(model, loss_fn, inputs, targets, layer_map):
+    params = [p for p in model.parameters() if p.requires_grad]
+    # model.zero_grad(set_to_none=True)
+    outputs = model(inputs)
+    per_sample_losses = loss_fn(outputs, targets)
+    B = per_sample_losses.shape[0]
+
+    # Dictionary to store per-sample flattened grads per layer
+    layer_grads = {layer: [] for layer in layer_map}
+
+    for i in range(B):
+        loss_i = per_sample_losses[i]
+        gi = torch.autograd.grad(loss_i, params, retain_graph=(i < B - 1))
+        
+        # Map grads back to layers
+        p_idx = 0
+        for layer, l_params in layer_map.items():
+            l_gi = gi[p_idx : p_idx + len(l_params)]
+            gi_flat = torch.cat([g.detach().contiguous().view(-1) for g in l_gi])
+            layer_grads[layer].append(gi_flat)
+            p_idx += len(l_params)
+
+    variances = {}
+    for layer, grads in layer_grads.items():
+        G = torch.stack(grads, dim=0)
+        g_bar = G.mean(dim=0)
+        variances[layer] = ((G - g_bar)**2).sum(dim=1).mean().item()
+    
+    return variances
 
 import math
 

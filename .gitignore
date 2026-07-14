@@ -3,3 +3,7 @@ wandb/
 continual-venv/
 __pycache__/
 plots/
+data/
+fid_tmp/
+checkpoints/
+diffusion_v2/
