@@ -227,6 +227,11 @@ def get_parser():
     parser.add_argument("--tau_ref_window", type=int, default=500, help="Rolling window size for median tau_ref tracking")
     parser.add_argument("--track_coherence", action="store_true", help="Track cross-layer tau correlation structure")
     parser.add_argument("--coherence_window", type=int, default=100, help="Rolling window size for cross-layer tau coherence tracking")
+    parser.add_argument("--joint_controller", action="store_true", help="Enable the joint LR-cooling / reg-boost controller")
+    parser.add_argument("--joint_shock_threshold", type=float, default=0.1, help="Sharpness derivative magnitude above which a layer is in 'shock' regime")
+    parser.add_argument("--joint_max_lr_cool", type=float, default=0.05, help="Max fractional LR cooling applied by the joint controller")
+    parser.add_argument("--joint_max_reg_boost", type=float, default=4.0, help="Max multiplicative reg boost applied by the joint controller")
+    parser.add_argument("--joint_alpha_variant", type=str, default="t", choices=["t", "sqm10", "sqm1"], help="Which alpha_crit variant feeds the joint controller's stability signal")
     return parser
 
     

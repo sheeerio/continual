@@ -18,6 +18,8 @@ from utils.optimizers import PerLayerLyapunovScheduler
 
 parser = get_parser()
 config = parser.parse_args()
+assert not (config.joint_controller and config.lr_schedule == "pl_lyapunov"), \
+    "joint_controller subsumes pl_lyapunov; enable only one"
 if not hasattr(config, "snr_margin"):       config.snr_margin = 0.0
 if not hasattr(config, "snr_pred_window"):  config.snr_pred_window = 20
 LENGTH_CHOICES = [100, 300, 50, 150]
@@ -361,6 +363,19 @@ for task in range(config.runs):
     else:
         scheduler = None
 
+    if config.joint_controller:
+        joint_ctrl = optimizers.JointLRRegController(
+            optimizer, layer_map, config,
+            safety=config.safety,
+            max_lr_cool=config.joint_max_lr_cool,
+            max_reg_boost=config.joint_max_reg_boost,
+            shock_threshold=config.joint_shock_threshold,
+        )
+        joint_reg_boost = {layer: 1.0 for layer in layer_map}
+    else:
+        joint_ctrl = None
+        joint_reg_boost = {}
+
     sum_up = 0.0
     this_task_acc = 0.0
     this_normalized_sharp = 0.0
@@ -502,6 +517,12 @@ for task in range(config.runs):
                             adaptive_factor = sensitivity * tau_ref / (tau + tau_ref)
                         else:
                             adaptive_factor = sensitivity * (1.0 / (tau + 1e-12))
+
+                    # Joint controller reg boost: applied every step from the
+                    # multiplier computed at the last log_interval tick, since
+                    # the alpha_crit signal itself is only cheap to compute there.
+                    if config.joint_controller:
+                        adaptive_factor = adaptive_factor * joint_reg_boost.get(layer, 1.0)
 
                     # 3. Apply Penalty (L2 or Spectral)
                     layer_reg_val = torch.tensor(0.0, device=device)
@@ -753,6 +774,30 @@ for task in range(config.runs):
                         elif config.param == "r_tau":
                             lr_star = pl_scheduler.step(layer, eff_lr, act_scalars["tau"], total_updates, total_steps)
                         # lr_star = pl_scheduler.step(layer, eff_lr, scalars["tau"], config)
+
+                    if config.joint_controller:
+                        if config.joint_alpha_variant == "sqm10":
+                            alpha_crit_layer = alpha_crit_sqm_layer10
+                        elif config.joint_alpha_variant == "sqm1":
+                            alpha_crit_layer = alpha_crit_sqm_layer1
+                        else:
+                            alpha_crit_layer = alpha_crit_t
+
+                        # base=1.0 so the returned factor is the pure reg-boost
+                        # multiplier; it gets cached and applied every step in
+                        # the adaptive_reg loop against that step's own tau-based
+                        # adaptive_factor.
+                        reg_boost, lr_factor, w_lr, w_reg, regime = joint_ctrl.step(
+                            layer, eff_lr, alpha_crit_layer, lam, 1.0
+                        )
+                        joint_reg_boost[layer] = reg_boost
+
+                        wandb.log({
+                            f"{layer}/joint_lr_factor": lr_factor,
+                            f"{layer}/joint_w_lr": w_lr,
+                            f"{layer}/joint_w_reg": w_reg,
+                            f"{layer}/joint_regime": regime,
+                        }, commit=False)
 
                 # accumulate union across layers for this log step
                 ly_union_sum += union_pred_step

@@ -847,6 +847,65 @@ class CrossLayerCoherence:
         }
 
 
+class JointLRRegController:
+    """
+    Jointly allocates a corrective response to per-layer instability between
+    LR cooling and regularization strengthening, based on regime detection
+    (shock: sharpness moving fast → cool the LR; drift: slow → lean on reg).
+    """
+    def __init__(self, optimizer, layer_map, cfg,
+                 safety=0.9, max_lr_cool=0.05, max_reg_boost=4.0,
+                 shock_threshold=0.1, window=50):
+        self.opt = optimizer
+        self.cfg = cfg
+        self.safety = safety
+        self.max_lr_cool = max_lr_cool
+        self.max_reg_boost = max_reg_boost
+        self.shock_threshold = shock_threshold
+        self.window = window
+
+        # map "fc1" → [group_idx, …]  (usually just one group per layer)
+        self.layer2groups = {}
+        for i, g in enumerate(self.opt.param_groups):
+            lyr = g.get('layer', None)
+            if lyr is not None:
+                self.layer2groups.setdefault(lyr, []).append(i)
+
+        self.sharp_history: Dict[str, Deque[float]] = {
+            layer: deque(maxlen=window) for layer in layer_map
+        }
+
+    def _compute_split(self, layer):
+        """Returns (w_lr, w_reg, regime) for a layer; regime: 0=drift, 1=shock."""
+        hist = self.sharp_history[layer]
+        if len(hist) < 2:
+            return 0.2, 0.8, 0
+
+        derivative = (hist[-1] - hist[0]) / self.window
+        if abs(derivative) > self.shock_threshold:
+            return 0.8, 0.2, 1
+        return 0.2, 0.8, 0
+
+    def step(self, layer, eff_lr, alpha_crit, sharpness, base_adaptive_factor):
+        self.sharp_history.setdefault(layer, deque(maxlen=self.window)).append(float(sharpness))
+
+        w_lr, w_reg, regime = self._compute_split(layer)
+
+        s_l = eff_lr / max(alpha_crit, 1e-12)
+        excess = max(0.0, s_l - self.safety)
+        excess_clipped = min(max(excess, 0.0), 1.0)
+
+        lr_factor = 1.0 - w_lr * excess_clipped * self.max_lr_cool
+        reg_boost = 1.0 + w_reg * excess_clipped * self.max_reg_boost
+
+        if layer in self.layer2groups:
+            for gi in self.layer2groups[layer]:
+                self.opt.param_groups[gi]['lr'] *= lr_factor
+
+        adjusted_adaptive_factor = base_adaptive_factor * reg_boost
+        return adjusted_adaptive_factor, lr_factor, w_lr, w_reg, regime
+
+
 def grad_variance_within_batch_by_layer(model, loss_fn, inputs, targets, layer_map):
     """
     Per-layer within-minibatch gradient variance.
