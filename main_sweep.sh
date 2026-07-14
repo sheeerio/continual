@@ -46,7 +46,7 @@ for reg in "${REGS[@]}"; do
               REG_FLAGS="--reg none --l2_lambda 0 --adaptive_reg --adaptive_scope local --adaptive_type wass --adaptive_form saturating --tau_ref_mode median --tau_ref_window 500 --reg_sensitivity ${coef}" ;;
           esac
 
-          CMD="python3 implicit_regularization.py --seed ${seed} --optimizer adam --activation ${ACT} --runs 10 --epochs 200 --ns 1.0 --lr ${lr} --dataset MNIST --lr_schedule constant --track_coherence --coherence_window 100 ${REG_FLAGS} --name=${NAME} --exp_name=${EXP_NAME}"
+          CMD="python3 implicit_regularization.py --seed ${seed} --optimizer adam --activation ${ACT} --runs 10 --epochs 100 --ns 1.0 --lr ${lr} --dataset MNIST --lr_schedule constant --track_coherence --coherence_window 100 ${REG_FLAGS} --name=${NAME} --exp_name=${EXP_NAME}"
           COMMANDS+=("${CMD}")
         done
       done
