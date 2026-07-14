@@ -22,7 +22,7 @@ for reg in "${REGS[@]}"; do
     for lr in "${LRS[@]}"; do
       for coef in "${COEFS[@]}"; do
         for seed in "${SEEDS[@]}"; do
-          NAME="reg-${reg}_method-${method}_lr-${lr}_coef-${coef}_seed-${seed}"
+          NAME="reg-${reg}_method-${method}_lr-${lr}_coef-${coef}"
 
           # base reg flags
           case "${method}_${reg}" in
