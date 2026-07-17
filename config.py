@@ -73,7 +73,7 @@ def get_parser():
         "--reg",
         type=str,
         default="l2",
-        choices=["l2", "l2_init", "wass", "spectral", "shrink_perturb", "ortho", "orthofrob"],
+        choices=["l2", "l2_init", "wass", "spectral", "shrink_perturb", "ortho", "orthofrob", "parseval", "parseval", "l2_loss"],
     )
     parser.add_argument("--wass_lambda", type=float, default=0.0)
     parser.add_argument("--exp_name", type=str, default="")
@@ -219,8 +219,13 @@ def get_parser():
 
     parser.add_argument("--adaptive_reg", action="store_true", help="Enable 1/tau regularization")
     parser.add_argument("--adaptive_scope", type=str, default="local", choices=["local", "global"], help="Scope for adaptive regularization")
-    parser.add_argument("--adaptive_type", type=str, default="l2", choices=["l2", "spectral", "wass"], help="Type of adaptive regularization")
+    parser.add_argument("--adaptive_type", type=str, default="l2", choices=["l2", "spectral", "wass", "parseval"], help="Type of adaptive regularization")
     parser.add_argument("--reg_sensitivity", type=float, default=0.001, help="Scaling factor for inverse tau penalty")
+    parser.add_argument("--results_csv", type=str, default=None)
+    parser.add_argument("--parseval_lambda", type=float, default=0.0)
+    parser.add_argument("--adaptive_scale", type=str, default="inv", choices=["inv","saturating"])
+    parser.add_argument("--sat_kappa", type=float, default=1.0)
+    parser.add_argument("--hidden", type=int, default=256)
     return parser
 
     

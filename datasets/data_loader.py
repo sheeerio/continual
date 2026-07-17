@@ -6,20 +6,20 @@ from torch.utils.data import Subset
 
 def get_dataset(config):
     if config.dataset == "MNIST":
-        tmp = MNIST(root="../data", train=True, download=True)
+        tmp = MNIST(root="/home/gbaveja/data", train=True, download=False)
         DATA_MEAN = (tmp.data / 255.0).mean(axis=(0, 1, 2))
         DATA_STD = (tmp.data / 255.0).std(axis=(0, 1, 2))
         tf = transforms.Compose(
             [transforms.ToTensor(), transforms.Normalize(DATA_MEAN, DATA_STD)]
         )
-        full = MNIST(root="../data", train=True, download=True, transform=tf)
+        full = MNIST(root="/home/gbaveja/data", train=True, download=False, transform=tf)
         perm = torch.randperm(len(full))[:10600]
         train_dataset = Subset(full, perm)
-        test_dataset = MNIST(root="../data", train=False, download=True, transform=tf)
+        test_dataset = MNIST(root="/home/gbaveja/data", train=False, download=False, transform=tf)
         in_ch = 1
         input_size = 28 * 28
     elif config.dataset == "CIFAR10":
-        tmp = CIFAR10(root="../data", train=True, download=True)
+        tmp = CIFAR10(root="/home/gbaveja/data", train=True, download=False)
         DATA_MEAN = (tmp.data / 255.0).mean(axis=(0, 1, 2))
         DATA_STD = (tmp.data / 255.0).std(axis=(0, 1, 2))
         tf = transforms.Compose(
@@ -28,14 +28,14 @@ def get_dataset(config):
                 transforms.Normalize(tuple(DATA_MEAN.tolist()), tuple(DATA_STD.tolist())),
             ]
         )
-        full = CIFAR10(root="../data", train=True, download=True, transform=tf)
+        full = CIFAR10(root="/home/gbaveja/data", train=True, download=False, transform=tf)
         perm = torch.randperm(len(full))[:20400]
         train_dataset = Subset(full, perm)
-        test_dataset = CIFAR10(root="../data", train=False, download=True, transform=tf)
+        test_dataset = CIFAR10(root="/home/gbaveja/data", train=False, download=False, transform=tf)
         in_ch = 3
         input_size = 3 * 32 * 32
     elif config.dataset == "PermutedMNIST":
-        base_full = MNIST(root="../data", train=True, download=True)
+        base_full = MNIST(root="/home/gbaveja/data", train=True, download=False)
         DATA_MEAN = (base_full.data / 255.0).mean(axis=(0, 1, 2))
         DATA_STD = (base_full.data / 255.0).std(axis=(0, 1, 2))
         torch.manual_seed(config.seed)
@@ -52,9 +52,9 @@ def get_dataset(config):
         base.indices = subsample_idx
         train_dataset = base
         test_dataset = MNIST(
-            root="../data",
+            root="/home/gbaveja/data",
             train=False,
-            download=True,
+            download=False,
             transform=transforms.Compose(
                 [
                     transforms.ToTensor(),
@@ -66,7 +66,7 @@ def get_dataset(config):
         in_ch = 1
         input_size = 28 * 28
     elif config.dataset == "Shuffle_CIFAR":
-        tmp = CIFAR10(root="../data", train=True, download=True)
+        tmp = CIFAR10(root="/home/gbaveja/data", train=True, download=False)
         DATA_MEAN = (tmp.data / 255.0).mean(axis=(0, 1, 2))
         DATA_STD = (tmp.data / 255.0).std(axis=(0, 1, 2))
         tf = transforms.Compose(
@@ -76,7 +76,7 @@ def get_dataset(config):
             ]
         )
 
-        full_train = CIFAR10(root="../data", train=True, download=True, transform=tf)
+        full_train = CIFAR10(root="/home/gbaveja/data", train=True, download=False, transform=tf)
         subset_indices = torch.randperm(len(full_train))[:5000]
         train_subset = Subset(full_train, subset_indices)
         if isinstance(full_train.targets, torch.Tensor):
@@ -84,7 +84,7 @@ def get_dataset(config):
         else:
             orig_labels = [full_train.targets[i] for i in subset_indices]
 
-        test_dataset = CIFAR10(root="../data", train=False, download=True, transform=tf)
+        test_dataset = CIFAR10(root="/home/gbaveja/data", train=False, download=False, transform=tf)
         in_ch, input_size = 3, 3 * 32 * 32
     elif config.dataset == "Tiny_ImageNet":
         from torchvision.datasets import ImageNet
@@ -98,10 +98,10 @@ def get_dataset(config):
                 transforms.Normalize(DATA_MEAN, DATA_STD),
             ]
         )
-        full = ImageNet(root="../data", split="train", download=True, transform=tf)
+        full = ImageNet(root="/home/gbaveja/data", split="train", download=False, transform=tf)
         perm = torch.randperm(len(full))[:128000]
         train_dataset = Subset(full, perm)
-        test_dataset = ImageNet(root="../data", split="val", download=True, transform=tf)
+        test_dataset = ImageNet(root="/home/gbaveja/data", split="val", download=False, transform=tf)
         in_ch, input_size = 3, 3 * 224 * 224
 
     return train_dataset, test_dataset, in_ch, input_size, DATA_MEAN, DATA_STD

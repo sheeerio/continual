@@ -18,6 +18,9 @@ from utils.optimizers import PerLayerLyapunovScheduler
 
 parser = get_parser()
 config = parser.parse_args()
+from collections import deque as _dq
+tau_ref_hist = {}
+task_acc_history = []
 if not hasattr(config, "snr_margin"):       config.snr_margin = 0.0
 if not hasattr(config, "snr_pred_window"):  config.snr_pred_window = 20
 LENGTH_CHOICES = [100, 300, 50, 150]
@@ -41,7 +44,7 @@ task_lengths = [random.choice(LENGTH_CHOICES) for _ in range(config.runs)]
 train_dataset, test_dataset, in_ch, input_size, DATA_MEAN, DATA_STD = data_loader.get_dataset(config)
 
 config.alpha = 0.01 if config.activation == "leaky_relu" else config.alpha
-hidden = 256
+hidden = config.hidden
 if config.model == "MLP":
     model = mlp.MLP(input_size, hidden, 10).to(device)
 elif config.model == "BatchNormMLP":
@@ -470,7 +473,18 @@ for task in range(config.runs):
                     else:
                         # Local Mode: Use this layer's specific volatility
                         tau = scalars["tau"]
-                        adaptive_factor = sensitivity * (1.0 / (tau + 1e-12))
+                        if getattr(config, "adaptive_scale", "inv") == "saturating":
+                            h = tau_ref_hist.get(layer)
+                            if h is None:
+                                h = _dq(maxlen=100); tau_ref_hist[layer] = h
+                            h.append(float(tau))
+                            _s = sorted(h); _n = len(_s)
+                            tau_ref = _s[_n//2] if _n%2 else 0.5*(_s[_n//2-1]+_s[_n//2])
+                            tau_ref = max(tau_ref, 1e-12)
+                            g = tau_ref / (tau + tau_ref + 1e-12)
+                            adaptive_factor = sensitivity * (1.0 + config.sat_kappa * g)
+                        else:
+                            adaptive_factor = sensitivity * (1.0 / (tau + 1e-12))
 
                     # 3. Apply Penalty (L2 or Spectral)
                     layer_reg_val = torch.tensor(0.0, device=device)
@@ -1145,6 +1159,7 @@ for task in range(config.runs):
             "eff_acrit_rsqm10_pct_union": 1 - (eff_acrit_rsqm10_union_sum / steps),
         }
     )
+    task_acc_history.append(this_task_acc / (config.epochs * len(loader)))
     res = results[config.activation]
     res["batch_error"].append(J)
     res["param_norm"].append(pn)
@@ -1160,3 +1175,34 @@ for m in ["batch_error", "param_norm", "update_norm"]:
     plt.ylabel(m)
     plt.legend()
     plt.show()
+
+
+# ---- per-run summary CSV ----
+import csv as _csv, os as _os
+if getattr(config, "results_csv", None):
+    _traj = task_acc_history
+    _auc = sum(_traj)/len(_traj) if _traj else 0.0
+    _n = len(_traj)
+    if _n >= 2:
+        _x = list(range(_n)); _xm=sum(_x)/_n; _ym=sum(_traj)/_n
+        _num=sum((a-_xm)*(b-_ym) for a,b in zip(_x,_traj)); _den=sum((a-_xm)**2 for a in _x) or 1e-12
+        _slope=_num/_den
+    else:
+        _slope=0.0
+    _row={"adaptive_type":getattr(config,"adaptive_type",""),
+          "reg_sensitivity":getattr(config,"reg_sensitivity",""),
+          "adaptive_reg":bool(getattr(config,"adaptive_reg",False)),
+          "adaptive_scale":getattr(config,"adaptive_scale","inv"),
+          "reg":config.reg,"model":config.model,"dataset":config.dataset,
+          "lr":config.lr,"ns":config.ns,"hidden":getattr(config,"hidden",256),
+          "lr_schedule":getattr(config,"lr_schedule","constant"),
+          "sched_param":getattr(config,"param",""),
+          "seed":config.seed,"runs":config.runs,
+          "auc":_auc,"slope":_slope,
+          "final_acc":_traj[-1] if _traj else 0.0,
+          "task_acc_traj":";".join(f"{a:.5f}" for a in _traj)}
+    _exists=_os.path.exists(config.results_csv)
+    with open(config.results_csv,"a",newline="") as _fh:
+        _w=_csv.DictWriter(_fh,fieldnames=list(_row.keys()))
+        if not _exists or _fh.tell()==0: _w.writeheader()
+        _w.writerow(_row)
