@@ -808,7 +808,7 @@ def grad_variance_within_batch_by_layer(model, loss_fn, inputs, targets, layer_m
                          for layer, plist in layer_map.items()}
 
     # Collect per-sample grads, split by layer
-    layer_grads = {layer: [] for layer in layer_param_lists}
+    layer_accum = {}
     for i in range(B):
         loss_i = per_sample_losses[i]
         retain = (i < B - 1)
@@ -822,18 +822,24 @@ def grad_variance_within_batch_by_layer(model, loss_fn, inputs, targets, layer_m
             name2grad[id(p)] = g
             idx += 1
         for layer, plist in layer_param_lists.items():
-            g_l = torch.cat([name2grad[id(p)].contiguous().view(-1) for p in plist], dim=0)
-            layer_grads[layer].append(g_l.detach())
+            g_l = torch.cat([name2grad[id(p)].contiguous().view(-1) for p in plist], dim=0).detach()
+            acc = layer_accum.get(layer)
+            if acc is None:
+                layer_accum[layer] = [g_l.pow(2).sum(), g_l.clone(), 1]
+            else:
+                acc[0] += g_l.pow(2).sum(); acc[1] += g_l; acc[2] += 1
 
     sigma2_by_layer = {}
-    for layer, Glist in layer_grads.items():
-        if len(Glist) == 0:
+    for layer in layer_param_lists:
+        acc = layer_accum.get(layer)
+        if acc is None or acc[2] == 0:
             sigma2_by_layer[layer] = 0.0
             continue
-        G = torch.stack(Glist, dim=0)          # (B, P_l)
-        g_bar = G.mean(dim=0)
-        sigma2 = ((G - g_bar) ** 2).sum(dim=1).mean().item()
-        sigma2_by_layer[layer] = float(sigma2)
+        s1, sV, n = acc
+        # sigma2 = mean_i ||g_i - g_bar||^2 = (1/n) sum||g_i||^2 - ||g_bar||^2
+        g_bar = sV / n
+        sigma2 = (s1 / n) - g_bar.pow(2).sum()
+        sigma2_by_layer[layer] = float(sigma2.item())
 
     return sigma2_by_layer
 

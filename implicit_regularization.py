@@ -18,6 +18,7 @@ from utils.optimizers import PerLayerLyapunovScheduler
 
 parser = get_parser()
 config = parser.parse_args()
+RUN_DIAG = os.environ.get('RUN_DIAG','0') == '1'
 from collections import deque as _dq
 tau_ref_hist = {}
 task_acc_history = []
