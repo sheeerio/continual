@@ -5,7 +5,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=24000M
 #SBATCH --time=04:30:00
-#SBATCH --array=0-511%16
+#SBATCH --array=0-170%16
 #SBATCH --output=/home/gbaveja/scratch/plast_wide/logs/%x_%A_%a.out
 
 set -uo pipefail
@@ -14,8 +14,8 @@ source ~/venv/continual/bin/activate
 export WANDB_MODE=disabled
 
 ROOT=$HOME/scratch/plast_wide
-P=1
-CHUNK=1
+P=3
+CHUNK=3
 total=$(wc -l < "$ROOT/commands.txt")
 start=$(( SLURM_ARRAY_TASK_ID * CHUNK ))
 running=0
