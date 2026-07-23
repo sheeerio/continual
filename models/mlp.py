@@ -92,6 +92,80 @@ class MLP(nn.Module):
             # x = self.fc3(x)
         return self.fc4(x)
 
+class LayerNormMLP(nn.Module):
+    def __init__(self, i, h, o):
+        super().__init__()
+        self.fc1 = nn.Linear(i, h)
+        self.ln1 = nn.LayerNorm(h)
+        if config.activation in ("crelu", "fourier", "cleaky_relu"):
+            self.fc2 = nn.Linear(2 * h, h)
+            self.fc4 = nn.Linear(2 * h, o)
+        else:
+            self.fc2 = nn.Linear(h, h)
+            self.fc4 = nn.Linear(h, o)
+        self.ln2 = nn.LayerNorm(h)
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                if config.initialization == "kaiming":
+                    nn.init.kaiming_uniform_(
+                        m.weight,
+                        a=config.alpha if config.activation == "adalin" else 0,
+                        nonlinearity=(
+                            misc.activation_map[config.activation]
+                        ),
+                    )
+                elif config.initialization == "xavier":
+                    nn.init.xavier_uniform_(m.weight)
+                elif config.initialization == "normal":
+                    nn.init.normal_(m.weight, mean=config.normal_mean, std=config.normal_std)
+                elif config.initialization == "uniform":
+                    nn.init.uniform_(m.weight, a=config.uniform_a, b=config.uniform_b)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+
+    def forward(self, x):
+        if config.activation == "relu":
+            x = F.relu(self.ln1(self.fc1(x)))
+            x = F.relu(self.ln2(self.fc2(x)))
+        elif config.activation == "leaky_relu":
+            x = F.leaky_relu(self.ln1(self.fc1(x)))
+            x = F.leaky_relu(self.ln2(self.fc2(x)))
+        elif config.activation == "tanh":
+            x = torch.tanh(self.ln1(self.fc1(x)))
+            x = torch.tanh(self.ln2(self.fc2(x)))
+        elif config.activation == "crelu":
+            x1 = self.fc1(x)
+            x = torch.cat([F.relu(self.ln1(x1)), F.relu(-x1)], 1)
+            x2 = self.fc2(x)
+            x = torch.cat([F.relu(self.ln2(x2)), F.relu(-x2)], 1)
+        elif config.activation == "cleaky_relu":
+            x = self.fc1(x)
+            x = torch.cat([F.leaky_relu(self.ln1(x)), F.leaky_relu(-x)], 1)
+            x = self.fc2(x)
+            x = torch.cat([F.leaky_relu(self.ln2(x)), F.leaky_relu(-x)], 1)
+        elif config.activation == "adalin":
+            x = F.leaky_relu(self.ln1(self.fc1(x)), negative_slope=config.alpha)
+            x = F.leaky_relu(self.ln2(self.fc2(x)), negative_slope=config.alpha)
+        elif config.activation == "fourier":
+            x = torch.cat(
+                [torch.sin(self.ln1(self.fc1(x * 5.0))), torch.cos(self.ln1(self.fc1(x * 5.0)))], 1
+            )
+            x = torch.cat(
+                [torch.sin(self.ln2(self.fc2(x * 5.0))), torch.cos(self.ln2(self.fc2(x * 5.0)))], 1
+            )
+        elif config.activation == "softplus":
+            x = F.softplus(self.ln1(self.fc1(x)))
+            x = F.softplus(self.ln2(self.fc2(x)))
+        elif config.activation == "swish":
+            h1 = self.ln1(self.fc1(x))
+            x = h1 * torch.sigmoid(h1)
+            h2 = self.ln2(self.fc2(x))
+            x = h2 * torch.sigmoid(h2)
+        else:
+            x = self.ln1(self.fc1(x))
+            x = self.ln2(self.fc2(x))
+        return self.fc4(x)
+
 class BatchNormMLP(nn.Module):
     def __init__(self, i, h, o):
         super().__init__()

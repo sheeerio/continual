@@ -51,6 +51,8 @@ if config.model == "MLP":
     model = mlp.MLP(input_size, hidden, 10).to(device)
 elif config.model == "BatchNormMLP":
     model = mlp.BatchNormMLP(input_size, hidden, 10).to(device)
+elif config.model == "LayerNormMLP":
+    model = mlp.LayerNormMLP(input_size, hidden, 10).to(device)
 elif config.model == "LinearNet":
     model = nn.Sequential(nn.Flatten(), nn.Identity()).to(device)
 elif config.model == "CNN":
