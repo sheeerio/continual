@@ -10,7 +10,7 @@ import wandb
 import matplotlib.pyplot as plt
 import math
 from collections import deque
-from config import get_parser
+from config import get_parser, validate_reg_config
 from utils import misc, schedulers, optimizers
 from models import mlp, cnn
 from datasets import data_loader
@@ -18,6 +18,7 @@ from utils.optimizers import PerLayerLyapunovScheduler
 
 parser = get_parser()
 config = parser.parse_args()
+validate_reg_config(config)
 RUN_DIAG = os.environ.get('RUN_DIAG','0') == '1'
 from collections import deque as _dq
 tau_ref_hist = {}
@@ -425,8 +426,8 @@ for task in range(config.runs):
                         I = torch.eye(k, device=W.device, dtype=W.dtype)
                         reg += (W.t() @ W - I).pow(2).sum()
                 reg *= config.ortho_lambda
-            
-            step_stats = {} 
+
+            step_stats = {}
 
             if getattr(config, "adaptive_reg", False):
                 # Configuration Defaults

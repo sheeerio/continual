@@ -230,4 +230,32 @@ def get_parser():
     parser.add_argument("--coherence_window", type=int, default=100, help="Rolling window size for cross-layer tau coherence tracking")
     return parser
 
+
+REG_LAMBDA_FLAGS = {
+    "l2_loss": "l2_lambda",
+    "l2_init": "l2_lambda",
+    "spectral": "spectral_lambda",
+    "wass": "wass_lambda",
+    "ortho": "ortho_lambda",
+    "orthofrob": "ortho_lambda",
+    "parseval": "parseval_lambda",
+}
+
+
+def validate_reg_config(config):
+    """Fail loud if --reg needs a coefficient that was left at 0.0.
+
+    Exempt --reg none (not in REG_LAMBDA_FLAGS) and any --adaptive_reg run,
+    where the coefficient is carried by --reg_sensitivity on the adaptive
+    path and lambda == 0.0 on the static path is expected.
+    """
+    flag = REG_LAMBDA_FLAGS.get(config.reg)
+    if flag is None or getattr(config, "adaptive_reg", False):
+        return
+    if getattr(config, flag) == 0.0:
+        raise ValueError(
+            f"--reg {config.reg!r} requires --{flag} to be set (nonzero); "
+            f"got --{flag}=0.0 and --adaptive_reg is not set."
+        )
+
     
