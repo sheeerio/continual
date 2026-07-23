@@ -226,6 +226,8 @@ def get_parser():
     parser.add_argument("--adaptive_scale", type=str, default="inv", choices=["inv","saturating"])
     parser.add_argument("--sat_kappa", type=float, default=1.0)
     parser.add_argument("--hidden", type=int, default=256)
+    parser.add_argument("--track_coherence", action="store_true", help="Track cross-layer tau correlation structure")
+    parser.add_argument("--coherence_window", type=int, default=100, help="Rolling window size for cross-layer tau coherence tracking")
     return parser
 
     
