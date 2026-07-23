@@ -415,9 +415,13 @@ for task in range(config.runs):
                     if p.ndim < 2 or not p.requires_grad:
                         continue
                     if total_updates % config.ortho_interval == 0:
-                        sigma_now = optimizers.power_iteration_sigma_min(p, iters=1).detach()
-                        cached_sigma_min[name] = sigma_now
+                        # Keep this differentiable w.r.t. p -- this is the term
+                        # that actually drives sigma_min toward its target.
+                        sigma_now = optimizers.power_iteration_sigma_min(p, iters=1)
+                        cached_sigma_min[name] = sigma_now.detach()
                     else:
+                        # Reused across steps, so it must stay detached: the
+                        # graph it was computed on (a past p) is already gone.
                         sigma_now = cached_sigma_min.get(
                             name,
                             optimizers.power_iteration_sigma_min(p, iters=1).detach()
