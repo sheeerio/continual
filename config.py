@@ -157,7 +157,7 @@ def get_parser():
         "--sp_weight_decay",
         type=float,
         default=0.0,
-        help="Shrink factor (lambda) for shrink-and-perturb (weight decay per step)",
+        help="Shrink factor applied once per task boundary (theta <- (1-sp_weight_decay)*theta)",
     )
     parser.add_argument(
         "--sp_noise_std",
@@ -249,6 +249,14 @@ def validate_reg_config(config):
     where the coefficient is carried by --reg_sensitivity on the adaptive
     path and lambda == 0.0 on the static path is expected.
     """
+    if config.reg == "shrink_perturb":
+        if config.sp_weight_decay == 0.0 and config.sp_noise_std == 0.0:
+            raise ValueError(
+                "--reg 'shrink_perturb' requires --sp_weight_decay and/or "
+                "--sp_noise_std to be set (nonzero); got both == 0.0."
+            )
+        return
+
     flag = REG_LAMBDA_FLAGS.get(config.reg)
     if flag is None or getattr(config, "adaptive_reg", False):
         return

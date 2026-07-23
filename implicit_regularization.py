@@ -271,6 +271,13 @@ for task in range(config.runs):
         elif config.optimizer == "clamped_adam":
             optimizer = optimizers.ClampedAdam(layer_groups, lr=config.lr, lr_min=1e-2, lr_max=0.8)
 
+    # shrink perturb: applied ONCE per task boundary (Ash & Adams 2020),
+    # not per step. Task 0 is a fresh init, not a warm start, so it's exempt.
+    if task >= 1 and config.reg == "shrink_perturb":
+        for p in model.parameters():
+            if p.requires_grad:
+                p.data.mul_(1.0 - config.sp_weight_decay)
+                p.data.add_(config.sp_noise_std * torch.randn_like(p.data))
 
     if config.dataset == "PermutedMNIST":
         perm_tf = make_perm_tf(task)
@@ -1063,13 +1070,6 @@ for task in range(config.runs):
                 #     log_extra  = {"ly_lr_star": lr_star}
                 # else:
                 #     log_extra  = {}
-
-            # shrink perturb
-            if config.reg == "shrink_perturb":
-                for p in model.parameters():
-                    if p.requires_grad:
-                        p.data.mul_(1.0 - config.sp_weight_decay)
-                        p.data.add_(config.sp_noise_std * torch.randn_like(p.data))
 
             delta = torch.cat(
                 [(p.data - o).view(-1).abs() for p, o in zip(params, old)]
