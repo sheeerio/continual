@@ -426,6 +426,24 @@ for task in range(config.runs):
                         I = torch.eye(k, device=W.device, dtype=W.dtype)
                         reg += (W.t() @ W - I).pow(2).sum()
                 reg *= config.ortho_lambda
+            elif config.reg == "parseval":
+                # Parseval Networks (Cisse et al. 2017): push each weight
+                # matrix toward a Parseval tight frame, ||W W^T - I|| (or
+                # ||W^T W - I|| if that's the smaller/achievable identity).
+                # d_out <= d_in is the common case here (e.g. fc1: 256x784,
+                # fc4: 10x256), where only W @ W.T = I_{d_out} is reachable;
+                # W.T @ W = I_{d_in} never is once rank(W) < d_in.
+                for name, p in model.named_parameters():
+                    if p.ndim >= 2 and p.requires_grad:
+                        W = p.view(p.shape[0], -1)
+                        d_out, d_in = W.shape
+                        if d_out <= d_in:
+                            I = torch.eye(d_out, device=W.device, dtype=W.dtype)
+                            reg += (W @ W.t() - I).pow(2).sum()
+                        else:
+                            I = torch.eye(d_in, device=W.device, dtype=W.dtype)
+                            reg += (W.t() @ W - I).pow(2).sum()
+                reg *= config.parseval_lambda
 
             step_stats = {}
 
