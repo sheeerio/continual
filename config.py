@@ -55,7 +55,7 @@ def get_parser():
     parser.add_argument("--alpha", type=float, default=0.5)
     parser.add_argument("--l2_lambda", type=float, default=0.0)
     parser.add_argument("--spectral_lambda", type=float, default=1e-4)
-    parser.add_argument("--spectral_k", type=int, default=2)
+    parser.add_argument("--spectral_k", type=float, default=2)
     parser.add_argument("--lr", type=float, default=0.001)
     parser.add_argument("--beta1", type=float, default=0.9)
     parser.add_argument("--beta2", type=float, default=0.999)
@@ -73,7 +73,7 @@ def get_parser():
         "--reg",
         type=str,
         default="l2",
-        choices=["l2", "l2_init", "wass", "spectral", "shrink_perturb", "ortho", "orthofrob", "parseval", "parseval", "l2_loss"],
+        choices=["l2", "l2_init", "wass", "spectral", "shrink_perturb", "ortho", "orthofrob", "parseval", "l2_loss", "none"],
     )
     parser.add_argument("--wass_lambda", type=float, default=0.0)
     parser.add_argument("--exp_name", type=str, default="")
