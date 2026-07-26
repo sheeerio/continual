@@ -1067,7 +1067,18 @@ for task in range(config.runs):
                 
                 # betas scheduling
                 if config.optimizer == "adam":
-                    optimizer.param_groups[0]['betas'] = optimizers.get_betas(config, epoch)
+                    # Apply to every layer group, not just param_groups[0].
+                    # Only updating group 0 previously meant one layer (fc1)
+                    # got a per-task beta1/beta2 ramp that reset every task,
+                    # while every other layer group kept the original static
+                    # betas -- a purely artifactual per-layer discrepancy
+                    # that fed straight into compute_effective_lr (which
+                    # reads param_groups[0] only) and per_layer_effective_lr
+                    # (which reads each group's own betas), and from there
+                    # into alpha_crit and the lr-schedule's own step inputs.
+                    new_betas = optimizers.get_betas(config, epoch)
+                    for group in optimizer.param_groups:
+                        group['betas'] = new_betas
                 # lr schedule step
                 if config.lr_schedule != "constant" and scheduler is not None:
                     scheduler.step()    
