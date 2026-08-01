@@ -7,7 +7,7 @@ from torch.utils.data import DataLoader
 import torch.utils.data as data
 from collections import deque
 from typing import Deque, Dict, Tuple, List
-from utils.misc import EMAState
+from utils.misc import EMAState, activation_map
 
 # def power_iteration_sigma_min(W: torch.Tensor,
 #                                iters: int = 3,
@@ -70,6 +70,61 @@ def power_iteration_sigma_min(W: torch.Tensor,
     # Rayleigh quotient → λ_min(A); σ_min(W) = √λ_min
     sigma_min_sq = torch.dot(v, A @ v)
     return torch.sqrt(sigma_min_sq.clamp(min=0.0))
+
+
+def power_iteration_min_sv_vector(W: torch.Tensor,
+                                   iters: int = 3,
+                                   shift_mult: float = 1e-3):
+    """
+    Find (a detached approximation of) the singular vector associated with
+    sigma_min(W), via the same inverse-power-iteration numerics as
+    power_iteration_sigma_min, but entirely under torch.no_grad(). This is
+    the expensive, iterative torch.linalg.lstsq solve -- deliberately not
+    something to backprop through (differentiating through several rounds of
+    lstsq is not what gives the correct gradient of sigma_min w.r.t. W, and
+    is why differentiating this whole routine end-to-end left --reg ortho
+    gradient-dead in practice even after removing the outer .detach()).
+
+    Pair with sigma_min_from_vector(W, v, use_WtW) to get a differentiable
+    sigma_min(W) that only backprops through a single clean quadratic form.
+
+    Returns (v, use_WtW): v is detached; use_WtW says whether v is an
+    eigenvector of W^T W (True) or W W^T (False), matching
+    power_iteration_sigma_min's convention.
+    """
+    with torch.no_grad():
+        m, n = W.shape
+        use_WtW = (n <= m)
+        A = W.T @ W if use_WtW else W @ W.T
+
+        diag_mean = A.diagonal().mean()
+        ridge = shift_mult * diag_mean + 1e-6
+        A_shift = A + ridge * torch.eye(A.size(0), device=W.device, dtype=W.dtype)
+
+        v = torch.randn(A_shift.shape[0], device=W.device, dtype=W.dtype)
+        v.div_(v.norm() + 1e-12)
+        for _ in range(iters):
+            x = torch.linalg.lstsq(A_shift, v.unsqueeze(-1)).solution.squeeze(-1)
+            v = x / (x.norm() + 1e-12)
+    return v, use_WtW
+
+
+def sigma_min_from_vector(W: torch.Tensor, v: torch.Tensor, use_WtW: bool) -> torch.Tensor:
+    """
+    Differentiable sigma_min(W) given a FIXED (detached) direction v: the
+    Rayleigh quotient of W^T W (or W W^T) at v, with W attached so gradients
+    flow through W alone -- the standard Hellmann-Feynman trick (the
+    gradient of an eigenvalue w.r.t. the matrix, holding the eigenvector
+    fixed, is exact at a stationary point of the iteration that found v).
+    Cheap: one matrix-vector product, safe to call every step even when v
+    itself is cached/stale from a less-frequent power-iteration refresh.
+    """
+    if use_WtW:
+        Wv = W @ v
+        return torch.sqrt((Wv @ Wv) + 1e-12)
+    else:
+        WTv = W.t() @ v
+        return torch.sqrt((WTv @ WTv) + 1e-12)
 
 
 def randomize_targets(dataset, p):
@@ -184,38 +239,144 @@ def empirical_fischer_rank(model, dataset, device, thresh=0.99, max_m=100, cfg=N
     return j / float(m)
 
 
-def estimate_hessian_topk(model, loss, params, k=1, iters=100):
-    # First backward pass to get the gradient
-    grads = torch.autograd.grad(loss, params, create_graph=True)  # Retain the graph here
+def _flat_hvp(loss, params):
+    """Returns (hvp_fn, n) for the Hessian of `loss` wrt `params`."""
+    grads = torch.autograd.grad(loss, params, create_graph=True)
+    flat_grad = torch.cat([g.contiguous().view(-1) for g in grads])
+
+    def hvp(v):
+        g_v = (flat_grad * v).sum()
+        hv = torch.autograd.grad(g_v, params, retain_graph=True)
+        return torch.cat([h.contiguous().view(-1) for h in hv]).detach()
+
+    return hvp, flat_grad.numel(), flat_grad.device
+
+
+def estimate_hessian_lambda_max(model, loss, params, iters=100, v_init=None,
+                                return_v=False, tol=None, max_iters=None):
+    """ALGEBRAICALLY largest eigenvalue, not the largest-magnitude one.
+
+    Plain power iteration converges to the eigenvalue of largest MAGNITUDE, so
+    on a sign-indefinite Hessian it can return a negative number while being
+    consumed as "sharpness". This shifts by c = 1.1*|lam_mag| + eps to make
+    H + cI positive semidefinite -- after which largest-magnitude and largest-
+    algebraic coincide -- then unshifts.
+
+    Costs two power iterations (one to size the shift, one on the shifted
+    operator). Returns (lambda_max, n_iters_used[, v]).
+    """
+    hvp, n, device = _flat_hvp(loss, params)
+
+    def _power(op, v0, it, tolerance):
+        # Residual criterion ||Hv - lam*v|| / |lam| < tol -- gap-independent,
+        # unlike the Rayleigh-quotient-delta rule it replaces.
+        v = v0 if v0 is not None and v0.numel() == n else torch.randn(n, device=device)
+        v = (v.to(device).detach().clone()) / (v.norm() + 1e-12)
+        used = 0
+        for _ in range(it):
+            w = op(v)
+            used += 1
+            if tolerance is not None:
+                lam_cur = float(v.dot(w))
+                resid = float((w - lam_cur * v).norm()) / max(abs(lam_cur), 1e-12)
+                if resid < tolerance:
+                    break
+            v = w / (w.norm() + 1e-12)
+        return v, used
+
+    cap = max_iters if max_iters is not None else iters
+    v_mag, it1 = _power(hvp, None, cap, tol)
+    lam_mag = float(v_mag.dot(hvp(v_mag)))
+    c = 1.1 * abs(lam_mag) + 1e-6
+
+    def shifted(v):
+        return hvp(v) + c * v
+
+    v0 = v_init[0] if (v_init is not None and len(v_init) and v_init[0] is not None) else None
+    v_sh, it2 = _power(shifted, v0, cap, tol)
+    lam_max = float(v_sh.dot(shifted(v_sh))) - c
+
+    if return_v:
+        return lam_max, it1 + it2, [v_sh.detach()]
+    return lam_max, it1 + it2
+
+
+def estimate_hessian_topk(model, loss, params, k=1, iters=100,
+                          v_init=None, return_v=False,
+                          tol=None, return_iters=False):
+    """Top-k Hessian eigenvalues by power iteration.
+
+    v_init: optional list of k starting vectors (warm start). Weights move only
+    slightly between consecutive steps, so the previous step's eigenvector is a
+    far better init than a fresh N(0,I) draw -- the point of
+    --hessian_warm_start. Entries whose length no longer matches the parameter
+    vector (shape change) are silently replaced with a random draw.
+    return_v: also return the converged vectors, so the caller can cache them.
+
+    Defaults reproduce the original cold-start behavior exactly.
+    """
+    grads = torch.autograd.grad(loss, params, create_graph=True)
     flat_grad = torch.cat([g.contiguous().view(-1) for g in grads])
     n = flat_grad.numel()
 
-    # Hessian-vector product function
     def hvp(v):
         g_v = (flat_grad * v).sum()
-        hv = torch.autograd.grad(g_v, params, retain_graph=True)  # Retain the graph for second backward pass
+        hv = torch.autograd.grad(g_v, params, retain_graph=True)
         return torch.cat([h.contiguous().view(-1) for h in hv]).detach()
 
     eigs = []
     vs = []
-    for _ in range(k):
-        # Random initialization of eigenvector
-        v = torch.randn(n, device=flat_grad.device)
+    iters_used = []
+    for idx in range(k):
+        v = None
+        if v_init is not None and idx < len(v_init) and v_init[idx] is not None:
+            cand = v_init[idx]
+            if cand.numel() == n:
+                v = cand.to(flat_grad.device).detach().clone()
+        if v is None:
+            v = torch.randn(n, device=flat_grad.device)
         v = v / (v.norm() + 1e-12)
-        
-        # Power iteration for finding top k eigenvalues
+
+        # tol set => RESIDUAL-based stopping, `iters` acts as the cap.
+        #
+        # The criterion is ||Hv - lam*v|| / |lam| < tol, which is gap-
+        # independent. The previous rule (relative change in the Rayleigh
+        # quotient) fails exactly where it matters: as lambda2 -> lambda1 the
+        # RQ flattens while the eigenvector is still rotating, so it stops
+        # early at the worst-conditioned checkpoints -- and lambda2/lambda1
+        # here reaches 0.98. The residual also costs one FEWER HVP per
+        # iteration, since it reuses the w already computed.
+        used = 0
         for _ in range(iters):
             w = hvp(v)
             for j, u in enumerate(vs):
-                w = w - eigs[j] * (u.dot(w)) * u
+                # Gram-Schmidt: remove w's component along the already-found
+                # eigenvector. The previous form multiplied by eigs[j], which
+                # scales the projection by the eigenvalue instead of removing
+                # it -- for eigs[j] > 1 that over-subtracts and the iteration
+                # re-converges to the SAME dominant eigenvector, which is why
+                # k=3 returned three identical eigenvalues.
+                w = w - (u.dot(w)) * u
+            used += 1
+            if tol is not None:
+                lam_cur = float(v.dot(w))
+                resid = float((w - lam_cur * v).norm()) / max(abs(lam_cur), 1e-12)
+                if resid < tol:
+                    break
             v = w / (w.norm() + 1e-12)
-        
+        iters_used.append(used)
+
         Hv = hvp(v)
-        lam = v.dot(Hv).item()  # Eigenvalue (top)
+        lam = v.dot(Hv).item()
         eigs.append(lam)
         vs.append(v)
-    
-    return eigs
+
+    out = [eigs]
+    if return_v:
+        out.append([u.detach() for u in vs])
+    if return_iters:
+        out.append(iters_used)
+    return out[0] if len(out) == 1 else tuple(out)
 
 def compute_use_for_activation(h):
     with torch.no_grad():
@@ -245,6 +406,25 @@ def hessian_trace(loss, params, n_samples=1):
         trace_est += (flat_grad * Hv_flat).sum().item()
     return trace_est / n_samples
 
+def get_alpha_agg(optimizer):
+    """The Adam preconditioner scale used by get_norm_sharpness, exposed on its
+    own so lam and alpha_agg can be logged as SEPARATE columns. norm_lam is
+    their product, which makes it impossible to tell curvature-side volatility
+    (lam) from optimizer-state-side volatility (alpha_agg) after the fact."""
+    v_squares = []
+    for group in optimizer.param_groups:
+        for p in group["params"]:
+            state = optimizer.state[p]
+            if "exp_avg_sq" in state:
+                v_squares.append(state["exp_avg_sq"].detach().view(-1))
+    if len(v_squares) > 0:
+        v_cat = torch.cat(v_squares)
+        rms = torch.sqrt(v_cat.mean() + 1e-16)
+        lr0 = optimizer.param_groups[0]["lr"]
+        return float(lr0 / (rms + optimizer.param_groups[0]["eps"]))
+    return float(optimizer.param_groups[0]["lr"])
+
+
 def get_norm_sharpness(optimizer, sharpness, cfg):
     v_squares = []
     for group in optimizer.param_groups:
@@ -257,9 +437,15 @@ def get_norm_sharpness(optimizer, sharpness, cfg):
         v_cat = torch.cat(v_squares)
         rms = torch.sqrt(v_cat.mean() + 1e-16)
         lr0 = optimizer.param_groups[0]["lr"]
-        alpha_agg = lr0 / (rms + optimizer.param_groups[0]["eps"])
+        # float(): rms is a 0-dim tensor, so without this alpha_agg -- and
+        # therefore norm_sharpness, and everything update_stat derives from it
+        # (mu, tau, cv) -- comes back as a tensor. Those land in the diagnostic
+        # CSV as the literal string "tensor(0.9315, device='cuda:0')", which no
+        # downstream float() can parse. Numerically the values were always
+        # correct; they were just unreadable once written to disk.
+        alpha_agg = float(lr0 / (rms + optimizer.param_groups[0]["eps"]))
     else:
-        alpha_agg = optimizer.param_groups[0]["lr"]
+        alpha_agg = float(optimizer.param_groups[0]["lr"])
 
     if cfg.optimizer == "adam":
         norm_sharpness = sharpness * alpha_agg
@@ -299,6 +485,8 @@ class LyapunovScheduler:
         self.safety   = cfg.safety
         self.cool     = cool
         self.warm     = warm
+        # Was hardcoded 0.12 inline in step(); see --ly_eff_lr_floor.
+        self.eff_lr_floor = getattr(cfg, "ly_eff_lr_floor", 0.12)
 
     def step(self, effective_lr: float, tau: float, current_step: int, total_steps: int) -> Tuple[float, float]:
         """
@@ -311,7 +499,7 @@ class LyapunovScheduler:
             return float('inf'), effective_lr
 
         lr_star = tau
-        if effective_lr > 0.12 and effective_lr > self.safety * lr_star:    # too aggressive
+        if effective_lr > self.eff_lr_floor and effective_lr > self.safety * lr_star:    # too aggressive
             for g in self.opt.param_groups:
                 g['lr'] *= self.cool
         # elif current_step < 0.1 * total_steps and effective_lr < 0.3 * self.safety * lr_star:    # can warm up
@@ -337,15 +525,31 @@ def estimate_hessian_min_eig(model, loss, params, iters=100):
         Hv  = torch.autograd.grad(g_v, params, retain_graph=True)
         return -torch.cat([h.contiguous().view(-1) for h in Hv]).detach()  # -H v
 
-    # 3) vanilla power-iteration -----------------------------------------
-    v = torch.randn(d, device=g_flat.device);  v /= v.norm() + 1e-12
-    for _ in range(iters):
-        w = hvp_minus(v)
-        v = w / (w.norm() + 1e-12)
+    # 3) SHIFTED power-iteration ------------------------------------------
+    # Plain power iteration on -H converges to the LARGEST-MAGNITUDE eigenvalue
+    # of -H, which is -lambda_max(H) whenever |lambda_max| > |lambda_min|. The
+    # previous version therefore returned +lambda_max(H), not lambda_min -- it
+    # matched lambda_max to 4-5 digits at every checkpoint measured. Shift by
+    # c = 1.1*|lam_mag| so -H + cI is PSD, where largest-magnitude and
+    # largest-algebraic coincide, then unshift.
+    def _pow(op, it):
+        v = torch.randn(d, device=g_flat.device)
+        v = v / (v.norm() + 1e-12)
+        for _ in range(it):
+            w = op(v)
+            v = w / (w.norm() + 1e-12)
+        return v
 
-    Hv  = hvp_minus(v)                       # last HVP
-    lam = v.dot(Hv).item()                   # this is  |λ_min|
-    return -lam                              # flip sign → λ_min (<0)
+    v = _pow(hvp_minus, iters)
+    lam_mag = float(v.dot(hvp_minus(v)))
+    c = 1.1 * abs(lam_mag) + 1e-6
+
+    def shifted(u):
+        return hvp_minus(u) + c * u
+
+    v2 = _pow(shifted, iters)
+    lam_max_negH = float(v2.dot(shifted(v2))) - c   # = lambda_max(-H)
+    return -lam_max_negH                            # = lambda_min(H)
 
 import math
 from typing import Optional
@@ -652,6 +856,8 @@ class PerLayerLyapunovScheduler:
         self.opt          = optimizer
         self.layer_states = layer_states
         self.safety, self.cool, self.warm = cfg.safety, cool, warm
+        # Was hardcoded 0.12 inline in step(); see --ly_eff_lr_floor.
+        self.eff_lr_floor = getattr(cfg, "ly_eff_lr_floor", 0.12)
 
         # map "fc1" → [group_idx, …]  (usually just one group per layer)
         self.layer2groups = {}
@@ -671,7 +877,7 @@ class PerLayerLyapunovScheduler:
             return tau
 
         lr_star = tau                         # theoretical upper-bound
-        if eff_lr > 0.12 and eff_lr > self.safety * lr_star:    # too aggressive ⇒ cool
+        if eff_lr > self.eff_lr_floor and eff_lr > self.safety * lr_star:    # too aggressive ⇒ cool
             factor = self.cool
         # elif current_step < 0.1 * total_steps and eff_lr < 0.3 * self.safety * lr_star:   # too timid ⇒ warm
         #     factor = self.warm
@@ -846,15 +1052,179 @@ class CrossLayerCoherence:
             "layer_names": self.layer_names,
         }
 
-def grad_variance_within_batch_by_layer(model, loss_fn, inputs, targets, layer_map):
+class ContinualBackprop:
+    """
+    Continual Backprop (Dohare et al., "Loss of Plasticity in Deep Continual
+    Learning" / arXiv:2108.06325 "Continual Backprop"). Reference algorithm
+    (util_type='contribution') taken from the authors' own implementation,
+    lop/algos/gnt.py (GnT.update_utility / test_features / gen_new_features),
+    not approximated from memory:
+
+        new_util  = |out_layer.weight|.mean(dim=0) * |post_act_features|.mean(dim=0)
+        util      = decay_rate * util + (1 - decay_rate) * new_util      # EMA
+        bias_corr = util / (1 - decay_rate ** age)                       # Adam-style debias
+
+    A unit becomes eligible once age > maturity_threshold. Each step, a
+    replacement_rate-fraction of ELIGIBLE units (not the whole layer) is
+    replaced, using a fractional accumulator per layer so replacement_rate
+    << 1/eligible_count still replaces units over time instead of always
+    rounding to zero. Selection is lowest bias-corrected utility among
+    eligible units (torch.topk on -util).
+
+    On replacement: incoming weight rows are redrawn from the SAME init
+    distribution the model uses at t=0 (config.initialization); incoming
+    bias set to 0; BEFORE the outgoing weight column is zeroed, the next
+    layer's bias is bumped by out_weight[:, unit] * mean_feature_act[unit]
+    (bias-corrected) to preserve that unit's average contribution to
+    downstream units at the moment of replacement -- this is in the
+    reference implementation and is easy to miss re-deriving from memory.
+    Utility/age/mean_feature_act trackers reset to 0 for replaced units.
+    Optimizer per-parameter state (Adam exp_avg/exp_avg_sq/step, or SGD
+    momentum_buffer) is reset for replaced rows/columns so a reborn unit
+    doesn't inherit stale second-moment estimates from its previous life.
+    """
+
+    def __init__(self, layer_specs, config, optimizer=None):
+        """
+        layer_specs: list of (name, in_layer, out_layer) for each hidden
+        layer whose units are eligible for replacement -- in_layer's output
+        width is the unit count, out_layer is where their outgoing weights
+        live (e.g. ("fc1", model.fc1, model.fc2), ("fc2", model.fc2, model.fc4)).
+        """
+        self.layer_specs = layer_specs
+        self.replacement_rate = config.cbp_replacement_rate
+        self.maturity_threshold = config.cbp_maturity_threshold
+        self.decay_rate = config.cbp_decay_rate
+        self.config = config
+        self.optimizer = optimizer
+
+        device = layer_specs[0][1].weight.device
+        self.util = {name: torch.zeros(in_l.out_features, device=device) for name, in_l, _ in layer_specs}
+        self.mean_feature_act = {name: torch.zeros(in_l.out_features, device=device) for name, in_l, _ in layer_specs}
+        self.ages = {name: torch.zeros(in_l.out_features, device=device) for name, in_l, _ in layer_specs}
+        self.accumulated = {name: 0.0 for name, _, _ in layer_specs}
+        self.last_replaced_count = {name: 0 for name, _, _ in layer_specs}
+        self.total_replaced_count = {name: 0 for name, _, _ in layer_specs}
+
+    def _reinit_weight_rows(self, layer, row_idx):
+        """Redraw `layer.weight.data[row_idx, :]` from config.initialization,
+        computed against the FULL layer shape (so fan_in/fan_out used by
+        xavier etc. match what happened at t=0) then copy out just those rows."""
+        temp = torch.empty_like(layer.weight.data)
+        cfg = self.config
+        if cfg.initialization == "kaiming":
+            nn.init.kaiming_uniform_(
+                temp, a=cfg.alpha if cfg.activation == "adalin" else 0,
+                nonlinearity=activation_map[cfg.activation],
+            )
+        elif cfg.initialization == "xavier":
+            nn.init.xavier_uniform_(temp)
+        elif cfg.initialization == "normal":
+            nn.init.normal_(temp, mean=cfg.normal_mean, std=cfg.normal_std)
+        elif cfg.initialization == "uniform":
+            nn.init.uniform_(temp, a=cfg.uniform_a, b=cfg.uniform_b)
+        else:
+            nn.init.kaiming_uniform_(temp)
+        layer.weight.data[row_idx, :] = temp[row_idx, :]
+
+    def _reset_optimizer_state(self, in_layer, out_layer, row_idx):
+        if self.optimizer is None:
+            return
+        state = self.optimizer.state
+        in_w_state = state.get(in_layer.weight)
+        in_b_state = state.get(in_layer.bias)
+        out_w_state = state.get(out_layer.weight)
+        for key in ("exp_avg", "exp_avg_sq"):
+            if in_w_state is not None and key in in_w_state:
+                in_w_state[key][row_idx, :] = 0.0
+            if out_w_state is not None and key in out_w_state:
+                out_w_state[key][:, row_idx] = 0.0
+        if (in_w_state is not None and "step" in in_w_state
+                and torch.is_tensor(in_w_state["step"]) and in_w_state["step"].dim() > 0):
+            # standard torch.optim.Adam tracks step as a single 0-dim scalar
+            # per parameter (shared across all rows), so there's nothing
+            # per-unit to reset; only act if it's genuinely per-element shaped
+            in_w_state["step"][row_idx, :] = 0
+        if in_b_state is not None:
+            for key in ("exp_avg", "exp_avg_sq"):
+                if key in in_b_state:
+                    in_b_state[key][row_idx] = 0.0
+        if in_w_state is not None and "momentum_buffer" in in_w_state and in_w_state["momentum_buffer"] is not None:
+            in_w_state["momentum_buffer"][row_idx, :] = 0.0
+        if out_w_state is not None and "momentum_buffer" in out_w_state and out_w_state["momentum_buffer"] is not None:
+            out_w_state["momentum_buffer"][:, row_idx] = 0.0
+
+    def step(self, name, features):
+        """features: this step's POST-activation output of layer `name`,
+        shape (batch, width). Call once per hidden layer per training step,
+        after optimizer.step() (matches the reference: gradient update first,
+        then generate-and-test)."""
+        in_layer, out_layer = next((il, ol) for n, il, ol in self.layer_specs if n == name)
+        self.last_replaced_count[name] = 0
+        self.ages[name] += 1
+
+        with torch.no_grad():
+            output_weight_mag = out_layer.weight.data.abs().mean(dim=0)
+            feat = features.detach()
+            new_util = output_weight_mag * feat.abs().mean(dim=0)
+            self.util[name].mul_(self.decay_rate).add_(new_util, alpha=1 - self.decay_rate)
+            self.mean_feature_act[name].mul_(self.decay_rate).add_(feat.mean(dim=0), alpha=1 - self.decay_rate)
+
+            bias_correction = 1 - self.decay_rate ** self.ages[name]
+            bias_corrected_util = self.util[name] / bias_correction
+
+            eligible = torch.where(self.ages[name] > self.maturity_threshold)[0]
+            if eligible.numel() == 0:
+                return
+
+            self.accumulated[name] += self.replacement_rate * eligible.numel()
+            n_replace = int(self.accumulated[name])
+            if n_replace == 0:
+                return
+            self.accumulated[name] -= n_replace
+
+            victims = eligible[torch.topk(-bias_corrected_util[eligible], n_replace).indices]
+
+            # preserve the next layer's expected output before zeroing the
+            # outgoing weight (reference implementation detail)
+            out_layer.bias.data += (
+                out_layer.weight.data[:, victims]
+                * (self.mean_feature_act[name][victims] / bias_correction[victims])
+            ).sum(dim=1)
+
+            self._reinit_weight_rows(in_layer, victims)
+            in_layer.bias.data[victims] = 0.0
+            out_layer.weight.data[:, victims] = 0.0
+
+            self.util[name][victims] = 0.0
+            self.mean_feature_act[name][victims] = 0.0
+            self.ages[name][victims] = 0.0
+
+            self._reset_optimizer_state(in_layer, out_layer, victims)
+
+        self.last_replaced_count[name] = victims.numel()
+        self.total_replaced_count[name] += victims.numel()
+
+
+def grad_variance_within_batch_by_layer(model, loss_fn, inputs, targets, layer_map,
+                                        subsample=0):
     """
     Per-layer within-minibatch gradient variance.
       σ²_layer := (1/B) * Σ_i || g_i^(layer) - ḡ^(layer) ||²
+
+    subsample: if > 0 and < B, estimate from a random subset of that many
+    samples. This routine runs ONE autograd.grad per sample, so at B=256 it is
+    the single most expensive thing in the diagnostic block -- far more than the
+    Hessian estimator it sits next to.
 
     Returns:
       dict: layer -> sigma2 (float)
     """
     device = inputs.device
+    if subsample and 0 < subsample < inputs.shape[0]:
+        idx = torch.randperm(inputs.shape[0], device=device)[:subsample]
+        inputs = inputs[idx]
+        targets = targets[idx]
     params_all = [p for p in model.parameters() if p.requires_grad]
 
     # Forward once, get per-sample losses (no reduction)

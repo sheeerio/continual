@@ -50,6 +50,7 @@ def get_dataset(config):
 
         base.dataset = base_full
         base.indices = subsample_idx
+        base.perms = perms
         train_dataset = base
         test_dataset = MNIST(
             root="/home/gbaveja/data",

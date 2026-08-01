@@ -223,11 +223,35 @@ def get_parser():
     parser.add_argument("--reg_sensitivity", type=float, default=0.001, help="Scaling factor for inverse tau penalty")
     parser.add_argument("--results_csv", type=str, default=None)
     parser.add_argument("--parseval_lambda", type=float, default=0.0)
-    parser.add_argument("--adaptive_scale", type=str, default="inv", choices=["inv","saturating"])
+    parser.add_argument("--adaptive_scale", type=str, default="inv", choices=["inv","saturating","centered"], help="inv: factor = sensitivity/tau. saturating: sensitivity*(1+kappa*g). centered: sensitivity*(1+kappa*(g-0.5)) -- same g, but mean factor stays ~sensitivity for any kappa, so sat_kappa controls the SPREAD of the coefficient rather than its level (saturating shifts the level by ~(1+kappa/2), which moves the basin instead of reshaping it).")
     parser.add_argument("--sat_kappa", type=float, default=1.0)
     parser.add_argument("--hidden", type=int, default=256)
     parser.add_argument("--track_coherence", action="store_true", help="Track cross-layer tau correlation structure")
     parser.add_argument("--coherence_window", type=int, default=100, help="Rolling window size for cross-layer tau coherence tracking")
+    parser.add_argument("--diag_csv", type=str, default=None, help="Path to append per-log-step diagnostics (tau, sharpness, eff_lr, alpha_crit_*, coherence) -- survives WANDB_MODE=disabled, which otherwise discards all of it")
+    parser.add_argument("--hessian_tol", type=float, default=1e-2, help="RESIDUAL tolerance for power-iteration stopping: stop when ||Hv - lam*v||/|lam| < tol. Gap-independent, unlike the Rayleigh-quotient-delta rule it replaces (that one stopped early exactly where lambda2/lambda1 -> 1). NOTE the units changed with the criterion, so this default is not comparable to the old 1e-3.")
+    parser.add_argument("--hessian_max_iters", type=int, default=50, help="Iteration cap for residual-criterion stopping. 20 capped out on 42-46% of calls at the worst-conditioned checkpoints.")
+    parser.add_argument("--sigma2_subsample", type=int, default=0, help="Estimate the per-layer within-batch gradient variance from a random N-sample subset instead of all B. 0 = use all B (default, unchanged). This routine runs one autograd.grad per sample, so at B=256 it dominates the diagnostic block.")
+    parser.add_argument("--tau_ref_mode", type=str, default="median", choices=["median", "fixed"], help="How tau_ref is computed for the saturating/centered adaptive forms. median (default, behavior-preserving): rolling median of this layer's own tau. fixed: a constant reference frozen after task 0, which makes g sensitive to drift slower than the median window -- under median mode any uniform rescale of tau cancels exactly, so the mechanism cannot see slow drift. Reference-mode logic ported from 539fd61; that commit's competing tau_ref/(tau+tau_ref) factor form is NOT adopted.")
+    parser.add_argument("--tau_ref_fixed", type=float, default=None, help="Explicit tau_ref for --tau_ref_mode fixed. If unset, it is calibrated per layer as the mean tau over the last 20%% of task 0 and then frozen.")
+    parser.add_argument("--tau_ref_window", type=int, default=100, help="Rolling-median window for tau_ref. Was hardcoded to 100. A task is ~2100 steps, so 100 sees only local fluctuation.")
+    parser.add_argument("--tau_update_interval", type=int, default=1, help="Recompute the per-layer curvature estimate every N steps; hold adaptive_factor constant in between. tau is an EMA over ~30 steps and tau_ref a 100-step median, so both already smooth. Default 1 preserves current behavior.")
+    parser.add_argument("--curvature_proxy", type=str, default="lam1", choices=["lam1", "top3"], help="Control signal for tau. lam1: top eigenvalue. top3: mean of the top 3 (corrected deflation) -- lower step-to-step CV at comparable estimator noise, ~3.6x the cost per call.")
+    parser.add_argument("--hessian_warm_start", action="store_true", help="Carry the top-eigenvector across steps as the power-iteration init in the adaptive path's per-layer estimate_hessian_topk. Default off (cold random init every call, unchanged behavior).")
+    parser.add_argument("--hessian_iters", type=int, default=1, help="Power-iteration steps for the ADAPTIVE path's per-layer lam estimate (the tau control signal). Default 1 = previous behavior. At iters=1 the cold estimator's same-batch CV is 5-6x the batch-to-batch curvature CV and the mean is biased low by a layer-dependent factor.")
+    parser.add_argument("--ly_eff_lr_floor", type=float, default=0.12, help="Effective-LR floor below which the Lyapunov controllers (LyapunovScheduler, PerLayerLyapunovScheduler) do nothing. Was hardcoded to 0.12 in both; at that value the controller never fired on the calibrated Adam testbed, leaving scheduler arms byte-identical to their no-scheduler twins. Default preserves the previous behavior exactly.")
+    parser.add_argument("--diagnostics", type=str, default="full", choices=["off", "light", "full"], help="Cost lever for the observational diagnostic block. off: skip it entirely (no iters=100 hessian topk, no min_eig, no fisher rank, no grad-variance) EXCEPT whatever the active method needs -- adaptive_reg's per-layer iters=1 tau estimate and, for --lr_schedule pl_lyapunov, the alpha_crit inputs the controller consumes. light: per-task end-of-task snapshots only, expensive estimates on a coarse ~10-per-task grid, no per-step series. full: current behavior, every log_interval.")
+    parser.add_argument("--taskdiag_csv", type=str, default=None, help="Path to append PER-TASK end-of-task diagnostic snapshots, one row per (task, layer): mean/final tau, mean/final adaptive_factor, last-logged-step grad-variance sigma2, plus run-level mean/final normalized sharpness and coherence mean_off_diag. Long-format detail sink; the layer-collapsed version of these same series also lands as ;-joined trajectory columns on --results_csv")
+    parser.add_argument("--diag_interval", type=int, default=None, help="Step interval for the EXPENSIVE diagnostics only (hessian topk/min_eig at iters=100/20, per-sample grad variance at batch_size backprops). Defaults to log_interval if unset, i.e. unchanged behavior; set larger to decouple these from the cheap per-log-interval logging that dominates runtime otherwise")
+    parser.add_argument("--diag_task_interval", type=int, default=1, help="Task interval for the empirical Fisher-rank estimate (max_m single-sample backprops each). Default 1 = every task (unchanged behavior); set larger to skip tasks")
+
+    # Continual Backprop (Dohare et al.) -- architectural intervention, NOT a
+    # --reg branch: no loss term, no lambda, not part of the coefficient-axis
+    # sweep. Reported as its own traditional baseline (AUC/slope vs vanilla).
+    parser.add_argument("--use_cbp", action="store_true", help="Enable Continual Backprop (per-unit utility tracking + low-utility reinit)")
+    parser.add_argument("--cbp_replacement_rate", type=float, default=1e-4, help="Fraction of ELIGIBLE (mature) units replaced per step, per layer")
+    parser.add_argument("--cbp_maturity_threshold", type=int, default=100, help="Steps a unit must age before it's eligible for replacement")
+    parser.add_argument("--cbp_decay_rate", type=float, default=0.99, help="EMA decay rate for the per-unit contribution-utility estimate")
     return parser
 
 
@@ -266,4 +290,30 @@ def validate_reg_config(config):
             f"got --{flag}=0.0 and --adaptive_reg is not set."
         )
 
-    
+
+CBP_SUPPORTED_MODELS = ("MLP", "BatchNormMLP", "LayerNormMLP")
+CBP_UNSUPPORTED_ACTIVATIONS = ("crelu", "fourier", "cleaky_relu")
+
+
+def validate_cbp_config(config):
+    """Fail loud if --use_cbp is set on an architecture/activation combo the
+    current implementation can't correctly bookkeep.
+
+    CBP tracks utility per hidden unit and needs a clean 1:1 correspondence
+    between a hidden layer's output width and the next layer's input width.
+    crelu/fourier/cleaky_relu concatenate [act(x), act(-x)] before the next
+    Linear, doubling that width, which breaks the unit<->weight-column
+    correspondence CBP's reinit logic relies on. Not implemented here.
+    """
+    if not getattr(config, "use_cbp", False):
+        return
+    if config.model not in CBP_SUPPORTED_MODELS:
+        raise ValueError(
+            f"--use_cbp requires --model in {CBP_SUPPORTED_MODELS}, got {config.model!r}."
+        )
+    if config.activation in CBP_UNSUPPORTED_ACTIVATIONS:
+        raise ValueError(
+            f"--use_cbp does not support --activation {config.activation!r} "
+            f"(concatenation-based activations break CBP's unit<->weight "
+            f"correspondence): unsupported = {CBP_UNSUPPORTED_ACTIVATIONS}."
+        )
