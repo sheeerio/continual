@@ -87,6 +87,11 @@ DIAG_CSV_FIELDS = [
     # MAXIMUM sensitivity*(1+kappa). A flat layer receives maximum
     # regularization. Recorded whenever it happens, not at log_interval.
     "event", "grad_norm", "weight_norm", "dead_frac",
+    # Per-layer health, logged for EVERY layer at every diagnostic step (not
+    # just at near-zero events): dead-activation fraction, weight/bias/grad
+    # magnitude, and mean pre-activation. Together these separate a layer dying
+    # from negative bias, from weight collapse, or from input starvation.
+    "h_dead_frac", "h_weight_norm", "h_bias_mean", "h_grad_norm", "h_act_mean",
     "alpha_crit_scv1", "alpha_crit_ss1", "alpha_crit_svar1",
     "alpha_crit_scv10", "alpha_crit_ss10", "alpha_crit_svar10",
     "alpha_crit_sqm1", "alpha_crit_sqm10",
@@ -139,6 +144,12 @@ TASKDIAG_CSV_FIELDS = [
     # quantities are already computed in the logging block, so this only
     # accumulates values that were being discarded.
     "eff_lr_layer_mean", "eff_lr_layer_min", "eff_lr_layer_max",
+    # Per-unit structure at end of task. bias percentiles distinguish a uniform
+    # drift from a subpopulation of outliers; the dead/alive weight-norm split
+    # tests whether weight growth concentrates in surviving units (dead units
+    # pass no gradient to their own incoming weights).
+    "b_p05", "b_p25", "b_p50", "b_p75", "b_p95", "b_min", "b_max",
+    "n_dead", "n_alive", "wnorm_dead", "wnorm_alive",
     # run-level, repeated on each layer row so no join is needed to plot them
     "sharp_norm_mean", "sharp_norm_final",
     "eff_lr_agg_mean", "eff_lr_agg_min", "eff_lr_agg_max",
@@ -201,6 +212,7 @@ centered_factor_evals = 0
 # Per-layer top-eigenvector cache for --hessian_warm_start. Empty dict means
 # every call cold-starts, which is the default.
 hessian_v_cache = {}
+layer_health = {}
 # tau_ref state: frozen per-layer reference for --tau_ref_mode fixed, its
 # calibration accumulator, and the running mean of g used by `centered`.
 tau_ref_frozen = {}
@@ -236,6 +248,70 @@ def prof(name):
 
 
 _PROF_START = _time.time()
+
+
+_gpu_X = None
+
+
+class GPUBatches:
+    """Whole subset resident on GPU; batching is a randperm + slice. No workers,
+    no IPC, no per-batch collate. Labels are refreshed each task because
+    randomize_targets rewrites them; images are materialized once."""
+
+    def __init__(self, ds, batch_size, device, shuffle=True):
+        global _gpu_X
+        import torch as _t
+        self.shuffle = shuffle
+        if _gpu_X is None:
+            xs = []
+            for i in range(len(ds)):
+                xi, _ = ds[i]
+                xs.append(xi.view(-1))
+            _gpu_X = _t.stack(xs).to(device)
+        self.X = _gpu_X
+        base = ds.dataset if hasattr(ds, "dataset") else ds
+        idx = ds.indices if hasattr(ds, "indices") else range(len(ds))
+        tg = base.targets
+        tg = tg if _t.is_tensor(tg) else _t.tensor(tg)
+        self.Y = tg[_t.as_tensor(list(idx))].to(device)
+        self.bs = batch_size
+        self.device = device
+
+    def __len__(self):
+        return (self.X.shape[0] + self.bs - 1) // self.bs
+
+    def __iter__(self):
+        import torch as _t
+        n = self.X.shape[0]
+        # shuffle=False iterates in subset order, matching DataLoader(shuffle=False)
+        # batch-for-batch. The spare draw is NOT cosmetic: _BaseDataLoaderIter
+        # burns one int64 off the default CPU generator per iterator it creates,
+        # and the eval block creates two per task (the J loop, then
+        # next(iter(...)) for effective_rank). Dropping them would have made this
+        # a 2-draws-per-task seed offset instead of a no-op, breaking bitwise
+        # comparability with every gpu-mode cell measured before v1.1.
+        if self.shuffle:
+            perm = _t.randperm(n, device=self.device)
+        else:
+            perm = None
+            _t.empty((), dtype=_t.int64).random_()
+        for i in range(0, n, self.bs):
+            j = perm[i:i + self.bs] if perm is not None else slice(i, i + self.bs)
+            yield self.X[j], self.Y[j]
+
+
+def make_loader(ds, shuffle=True):
+    mode = getattr(config, "loader_mode", "workers4")
+    # GPUBatches flattens each image, so it is MLP-only; CNNs keep the
+    # DataLoader path regardless of --loader_mode.
+    if mode == "gpu" and config.model not in ("CNN", "BatchNormCNN"):
+        return GPUBatches(ds, config.batch_size, device, shuffle=shuffle)
+    if mode == "persistent" and shuffle:
+        return data.DataLoader(ds, batch_size=config.batch_size, shuffle=True,
+                               num_workers=4, persistent_workers=True,
+                               pin_memory=True)
+    return data.DataLoader(ds, batch_size=config.batch_size, shuffle=shuffle,
+                           num_workers=4 if shuffle else 0)
 
 
 def _timed_iter(ld):
@@ -352,6 +428,21 @@ if config.model in [
     # model.fc3.register_forward_hook(save_activations("l3"))
 else:
     model.fc1.register_forward_hook(save_activations("l1"))
+
+if os.environ.get("HOOK_CHECK") == "1":
+    with torch.no_grad():
+        _xh = torch.randn(8, input_size, device=device)
+        _ = model(_xh)
+        _f1 = model.fc1(_xh)
+        _ok1 = torch.allclose(activations.get("l1", torch.zeros(1, device=device)), _f1, atol=1e-5)
+        _f2 = model.fc2(torch.relu(_f1))
+        _ok2 = torch.allclose(activations.get("l2", torch.zeros(1, device=device)), _f2, atol=1e-5)
+        _mis = torch.allclose(activations.get("l2", torch.zeros(1, device=device)), _f1, atol=1e-5)
+        print(f"HOOKCHECK l1==fc1(x): {_ok1} | l2==fc2(relu(fc1(x))): {_ok2} | "
+              f"l2==fc1(x) [misattribution]: {_mis} | "
+              f"l1!=l2: {not torch.allclose(activations['l1'], activations['l2'])}",
+              flush=True)
+
 
 def make_layer_groups(model, base_lr):
     layer_map = {}
@@ -614,9 +705,7 @@ for task in range(config.runs):
         # if task == 0:
         #     train_dataset = optimizers.randomize_targets(train_dataset, 0.0)
         # -x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x
-        loader = data.DataLoader(
-            train_dataset, batch_size=config.batch_size, shuffle=True, num_workers=4
-        )
+        loader = make_loader(train_dataset)
 
     total_updates = 0
     # Fisher rank costs max_m (default 100) single-sample backprops; this
@@ -1103,6 +1192,23 @@ for task in range(config.runs):
                     td_tau_sum[layer] = td_tau_sum.get(layer, 0.0) + _td_tau
                     td_tau_n[layer] = td_tau_n.get(layer, 0) + 1
                     td_tau_last[layer] = _td_tau
+                    # --- per-layer health snapshot (Task 2a/2c/2d) ---
+                    _hact = {"fc1": "l1", "fc2": "l2"}.get(layer)
+                    if _hact is not None and _hact in activations:
+                        _A = activations[_hact].detach()
+                        _h_dead = float((_A <= 0).float().mean())
+                        _h_actm = float(_A.mean())
+                    else:
+                        _h_dead = float("nan"); _h_actm = float("nan")
+                    _h_w = float(sum(float(q.data.norm()) ** 2 for q in l_params) ** 0.5)
+                    _h_b = float(np.mean([float(q.data.mean()) for q in l_params if q.ndim == 1])) \
+                        if any(q.ndim == 1 for q in l_params) else float("nan")
+                    # h_grad_norm is filled in below, once gi exists: this block
+                    # runs BEFORE loss.backward(), so p.grad is stale or None here.
+                    layer_health[layer] = {"h_dead_frac": _h_dead, "h_weight_norm": _h_w,
+                                           "h_bias_mean": _h_b, "h_grad_norm": float("nan"),
+                                           "h_act_mean": _h_actm}
+
                     _td_elr = float(eff_lr)
                     td_elr_sum[layer] = td_elr_sum.get(layer, 0.0) + _td_elr
                     td_elr_n[layer] = td_elr_n.get(layer, 0) + 1
@@ -1122,6 +1228,8 @@ for task in range(config.runs):
                     # ---- per-layer alpha_crit_s (unchanged) ----
                     with prof("perlayer_autograd_grad"):
                         gi = torch.autograd.grad(loss, l_params, retain_graph=True, allow_unused=False)
+                    layer_health[layer]["h_grad_norm"] = float(
+                        torch.cat([q.contiguous().view(-1) for q in gi]).norm())
                     g_layer_sq = float(torch.cat([g.contiguous().view(-1) for g in gi]).pow(2).sum().item())
 
                     sigma2_l = float(layer_sigma2_mb.get(layer, 0.0))
@@ -1232,6 +1340,7 @@ for task in range(config.runs):
                         "g_sq": float(g_layer_sq), "batch_acc": float(acc),
                         "lam_raw": float(lam),
                         "alpha_agg": optimizers.get_alpha_agg(optimizer),
+                        **layer_health.get(layer, {}),
                         "alpha_crit_scv1": float(alpha_crit_scv_layer1),
                         "alpha_crit_ss1": float(alpha_crit_ss_layer1),
                         "alpha_crit_svar1": float(alpha_crit_svar_layer1),
@@ -1738,9 +1847,10 @@ for task in range(config.runs):
 
 
     model.eval()
-    eval_loader = data.DataLoader(
-        train_dataset, batch_size=config.batch_size, shuffle=False
-    )
+    # Same gpu-resident path as training, but sequential: this loop was still
+    # doing len(train_dataset) mnist.__getitem__ calls per task under
+    # --loader_mode gpu (229,740 calls, ~35 s/cell in the cProfile).
+    eval_loader = make_loader(train_dataset, shuffle=False)
     total, count = 0.0, 0
     with torch.no_grad():
         for x, y in eval_loader:
@@ -1837,6 +1947,32 @@ for task in range(config.runs):
     _td_task_acc = task_acc_history[-1]
     _td_sharp_mean = (td_sharp_sum / td_sharp_n) if td_sharp_n else float("nan")
     _td_mod_mean = (td_mod_sum / td_mod_n) if td_mod_n else float("nan")
+    # Per-unit snapshot (1d/1e), from the last batch's activations.
+    _unit = {}
+    for _l, _lp in layer_map.items():
+        _W = next((q for q in _lp if q.ndim >= 2), None)
+        _b = next((q for q in _lp if q.ndim == 1), None)
+        _d = {}
+        if _b is not None:
+            _bv = _b.detach().float().cpu().numpy()
+            _qs = np.percentile(_bv, [5, 25, 50, 75, 95])
+            _d.update({"b_p05": float(_qs[0]), "b_p25": float(_qs[1]),
+                       "b_p50": float(_qs[2]), "b_p75": float(_qs[3]),
+                       "b_p95": float(_qs[4]), "b_min": float(_bv.min()),
+                       "b_max": float(_bv.max())})
+        _hk = {"fc1": "l1", "fc2": "l2"}.get(_l)
+        if _W is not None and _hk is not None and _hk in activations:
+            _A = activations[_hk].detach()
+            # A unit is dead if its pre-activation is <= 0 for EVERY sample in
+            # the batch -- distinct from dead_frac, which is over (sample, unit).
+            _dead = (_A <= 0).all(dim=0)
+            _rn = _W.detach().float().norm(dim=1)
+            _nd = int(_dead.sum()); _na = int((~_dead).sum())
+            _d.update({"n_dead": _nd, "n_alive": _na,
+                       "wnorm_dead": float(_rn[_dead].mean()) if _nd else float("nan"),
+                       "wnorm_alive": float(_rn[~_dead].mean()) if _na else float("nan")})
+        _unit[_l] = _d
+
     _td_layers = sorted(td_tau_last.keys())
     _td_sigma2_final = {l: float(layer_sigma2_mb.get(l, float("nan"))) for l in _td_layers}
 
@@ -1865,6 +2001,7 @@ for task in range(config.runs):
             "eff_lr_agg_mean": (td_eagg_sum / td_eagg_n) if td_eagg_n else "",
             "eff_lr_agg_min": td_eagg_min if td_eagg_n else "",
             "eff_lr_agg_max": td_eagg_max if td_eagg_n else "",
+            **_unit.get(_l, {}),
             "sharp_norm_mean": _td_sharp_mean, "sharp_norm_final": td_sharp_last,
             "mean_off_diag_mean": _td_mod_mean, "mean_off_diag_final": td_mod_last,
         })
@@ -1888,7 +2025,12 @@ for task in range(config.runs):
     res["param_norm"].append(pn)
     res["update_norm"].append(aun)
 
-    if config.track_coherence and coh is not None and coh["corr_matrix"] is not None:
+    # Gated on --make_plots: the tick-label layout in this block costs ~42 s/cell
+    # (matplotlib get_window_extent) and its only consumer is wandb.log, which is
+    # a no-op under WANDB_MODE=disabled. --track_coherence still writes
+    # mean_off_diag to the CSVs; only the rendered image is skipped.
+    if config.make_plots and config.track_coherence and coh is not None \
+            and coh["corr_matrix"] is not None:
         fig, ax = plt.subplots()
         im = ax.imshow(coh["corr_matrix"], vmin=-1, vmax=1, cmap="RdBu_r")
         ax.set_xticks(range(len(coh["layer_names"])))
@@ -1919,14 +2061,15 @@ if _diag_csv_fh is not None:
 if _taskdiag_csv_fh is not None:
     _taskdiag_csv_fh.close()
 
-tasks = np.arange(1, len(results[config.activation]["batch_error"]) + 1)
-for m in ["batch_error", "param_norm", "update_norm"]:
-    plt.figure()
-    plt.plot(tasks, results[config.activation][m], label=config.activation)
-    plt.xlabel("Task")
-    plt.ylabel(m)
-    plt.legend()
-    plt.show()
+if config.make_plots:
+    tasks = np.arange(1, len(results[config.activation]["batch_error"]) + 1)
+    for m in ["batch_error", "param_norm", "update_norm"]:
+        plt.figure()
+        plt.plot(tasks, results[config.activation][m], label=config.activation)
+        plt.xlabel("Task")
+        plt.ylabel(m)
+        plt.legend()
+        plt.show()
 
 
 # ---- per-run summary CSV ----
